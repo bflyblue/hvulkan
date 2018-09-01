@@ -1,5 +1,9 @@
-{-# LANGUAGE DataKinds        #-}
-{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
 
 module Lib
     ( test
@@ -21,6 +25,7 @@ import           Graphics.Vulkan.Core_1_0
 -- import           Graphics.Vulkan.Ext.VK_KHR_surface
 -- import           Graphics.Vulkan.Ext.VK_KHR_swapchain
 import           Graphics.Vulkan.Marshal.Create
+import           Safe
 
 logMsg :: MonadIO m => String -> m ()
 logMsg = liftIO . putStrLn
@@ -44,16 +49,16 @@ glfw =
       initializeGLFW
       terminateGLFW
 
-initializeGLFW :: MonadIO m => m ()
-initializeGLFW = liftIO $ do
+initializeGLFW :: IO ()
+initializeGLFW = do
   GLFW.init
     >>= throwGLFW "Unable to initialize GLFW"
   GLFW.vulkanSupported
     >>= throwGLFW "Vulkan not supported"
   logMsg "Initialized GLFW"
 
-terminateGLFW :: MonadIO m => m ()
-terminateGLFW = liftIO $ do
+terminateGLFW :: IO ()
+terminateGLFW = do
   GLFW.terminate
   logMsg "Terminated GLFW"
 
@@ -111,9 +116,11 @@ createVulkanInstance
   -> IO VkInstance
 createVulkanInstance progName engineName extensions layers =
   withPtr iCreateInfo $ \iciPtr ->
-    allocaPeek $
-      vkCreateInstance iciPtr VK_NULL
+    allocaPeek
+    ( vkCreateInstance iciPtr VK_NULL
         >=> throwVkResult "vkCreateInstance: Failed to create vkInstance."
+    )
+    <* logMsg "Created Vulkan instance"
   where
     appInfo = createVk @VkApplicationInfo
       $  set       @"sType" VK_STRUCTURE_TYPE_APPLICATION_INFO
@@ -134,7 +141,9 @@ createVulkanInstance progName engineName extensions layers =
       &* setListRef    @"ppEnabledExtensionNames" extensions
 
 destroyVulkanInstance :: VkInstance -> IO ()
-destroyVulkanInstance vkInstance = vkDestroyInstance vkInstance VK_NULL
+destroyVulkanInstance vkInstance =
+  vkDestroyInstance vkInstance VK_NULL
+    <* logMsg "Destroyed Vulkan instance"
 
 {-
 fetchAll
@@ -169,31 +178,51 @@ fetchAllMsg msg f =
 
 pickPhysicalDevice :: VkInstance -> IO VkPhysicalDevice
 pickPhysicalDevice vkInstance = do
-  devs <-
+  allDevices <-
     fetchAllMsg
       "pickPhysicalDevice: Failed to enumerate physical devices."
       (vkEnumeratePhysicalDevices vkInstance )
 
-  case length devs of
-    0 -> throwVkMsg "Zero device count!"
-    n -> logMsg $ "Found " ++ show n ++ " devices."
+  devices <- forM (zip [1..] allDevices) $ \(n::Int, device) -> do
+    logMsg $ "---- Device #" ++ show n ++ " ----"
+    props <- physicalDeviceProperties device
+    logDeviceProperties props
+    feats <- physicalDeviceFeatures device
+    logDeviceFeatures feats
+    logMsg "-------------------"
+    return (device, props, feats)
 
-  mapM_ logDeviceInfo devs
+  logMsg $ "Number of devices found " ++ show (length devices)
 
-  selectFirstSuitable devs
+  gpus <- filterM isDeviceSuitable devices
+
+  logMsg $ "Number of GPU devices found " ++ show (length gpus)
+
+  case headMay gpus of
+    Just (dev, _, _) -> return dev
+    Nothing -> throwVkMsg "No suitable GPU devices!"
+
+isDeviceSuitable :: (VkPhysicalDevice, VkPhysicalDeviceProperties, VkPhysicalDeviceFeatures) -> IO Bool
+isDeviceSuitable (_, props, feats) =
+  return $ isGpu && hasGeomShader
   where
-    selectFirstSuitable [] = throwVkMsg "No suitable devices!"
-    selectFirstSuitable (x:xs) = isDeviceSuitable x >>= \yes ->
-      if yes then pure x
-             else selectFirstSuitable xs
+    isGpu =
+      case getField @"deviceType" props of
+        VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU   -> True
+        VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU -> True
+        VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU    -> True
+        _                                      -> False
 
-isDeviceSuitable :: VkPhysicalDevice -> IO Bool
-isDeviceSuitable _ = pure True
+    hasGeomShader =
+      case getField @"geometryShader" feats of
+        VK_TRUE -> True
+        _       -> False
 
-logDeviceInfo :: VkPhysicalDevice -> IO ()
-logDeviceInfo vkPhysicalDevice = do
-  props <- allocaPeek $ vkGetPhysicalDeviceProperties vkPhysicalDevice
+physicalDeviceProperties :: VkPhysicalDevice -> IO VkPhysicalDeviceProperties
+physicalDeviceProperties = allocaPeek . vkGetPhysicalDeviceProperties
 
+logDeviceProperties :: VkPhysicalDeviceProperties -> IO ()
+logDeviceProperties props = do
   logMsg $ unwords [ "Device:", getStringField @"deviceName" props]
   logMsg $ unwords [ "Type:", show $ getField @"deviceType" props]
   logMsg $ unwords [ "Api:", toVersionString $ getField @"apiVersion" props]
@@ -206,7 +235,26 @@ logDeviceInfo vkPhysicalDevice = do
       , show (_VK_VERSION_PATCH v)
       ]
 
-data GlfwException
+physicalDeviceFeatures :: VkPhysicalDevice -> IO VkPhysicalDeviceFeatures
+physicalDeviceFeatures = allocaPeek . vkGetPhysicalDeviceFeatures
+
+logDeviceFeatures :: VkPhysicalDeviceFeatures -> IO ()
+logDeviceFeatures feats = do
+  logMsg $ unwords [ "Geometry Shader:", hasFeature @"geometryShader"]
+  logMsg $ unwords [ "Tessellation Shader:", hasFeature @"tessellationShader"]
+  where
+    hasFeature
+      :: forall fname
+      . ( CanReadField fname VkPhysicalDeviceFeatures
+        , FieldType fname VkPhysicalDeviceFeatures ~ VkBool32
+        )
+      => String
+    hasFeature =
+      case getField @fname feats of
+        VK_TRUE -> "Yes"
+        _ -> "No"
+
+newtype GlfwException
   = GlfwException
   { glfweMessage :: String
   } deriving (Eq, Show, Read)
