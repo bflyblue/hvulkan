@@ -1,0 +1,36 @@
+resolver: lts-12.8
+packages:
+- .
+extra-deps:
+- vulkan-api-1.1.3.0
+
+nix:
+  packages:
+  - glfw
+  - libGL
+  - zlib
+  - vulkan-headers
+  - vulkan-loader
+  - vulkan-tools
+  - vulkan-validation-layers
+  - linuxPackages.nvidia_x11
+  - xorg.fixesproto
+  - xorg.inputproto
+  - xorg.kbproto
+  - xorg.libX11
+  - xorg.libXau
+  - xorg.libXcursor
+  - xorg.libXext
+  - xorg.libXfixes
+  - xorg.libXi
+  - xorg.libXinerama
+  - xorg.libXrandr
+  - xorg.libXrender
+  - xorg.libXxf86vm
+  - xorg.libxcb
+  - xorg.randrproto
+  - xorg.renderproto
+  - xorg.xextproto
+  - xorg.xf86vidmodeproto
+  - xorg.xineramaproto
+  - xorg.xproto

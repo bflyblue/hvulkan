@@ -1,0 +1,60 @@
+name:                vulkan
+version:             0.1.0.0
+github:              "bflyblue/vulkan"
+license:             BSD3
+author:              "Shaun Sharples"
+maintainer:          "shaun.sharples@gmail.com"
+copyright:           "2018 Shaun Sharples"
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            Web
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/bflyblue/vulkan#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+- managed == 1.0.6
+- vulkan-api == 1.1.3.0
+- GLFW-b == 3.2.1.0
+
+ghc-options:
+- -Wall
+- -opta-Wa,-mrelax-relocations=no
+
+when:
+- condition: os(windows)
+  ghc-options:
+  - -optl-mwindows
+
+library:
+  source-dirs: src
+
+executables:
+  vulkan-exe:
+    main:                Main.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - vulkan
+
+tests:
+  vulkan-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - vulkan
