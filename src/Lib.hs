@@ -14,6 +14,7 @@ import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Managed
 import           Data.Bits
+import qualified Data.ByteString
 import qualified Data.Set                               as Set
 import           Foreign.C.String
 import           Foreign.Marshal.Alloc
@@ -57,7 +58,8 @@ test = runManaged $ do
                    extensions
                    layers
                    graphicsFamily
-  chain       <- pickSwapchain
+  (chain, chainFormat)
+              <- pickSwapchain
                    device
                    graphicsFamily
                    presentFamily
@@ -67,6 +69,11 @@ test = runManaged $ do
                    presentModes
                    winWidth
                    winHeight
+  swapImages  <- getSwapchainImages
+                   device
+                   chain
+  swapViews   <- mapM (imageView device chainFormat) swapImages
+
   return ()
   where
     extensions = [VK_KHR_SWAPCHAIN_EXTENSION_NAME]
@@ -578,7 +585,7 @@ pickSwapchain
   -> [VkPresentModeKHR]
   -> Word32
   -> Word32
-  -> Managed VkSwapchainKHR
+  -> Managed (VkSwapchainKHR, VkFormat)
 pickSwapchain
     device
     graphicsFamily
@@ -591,28 +598,30 @@ pickSwapchain
     height = do
   (surfaceFormat, colorSpace) <- liftIO $ pickSurfaceFormat surfaceFormats
   presentMode <- liftIO $ pickPresentMode presentModes
-  extent <- liftIO $ pickSwapExtent surfaceCaps width height
+  swapExtent <- liftIO $ pickSwapExtent surfaceCaps width height
   imageCount <- liftIO $ pickImageCount surfaceCaps
   logMsg
     ( "Picked swapchain: " ++ unwords
       [ "format=" ++ show surfaceFormat
       , "colorspace=" ++ show colorSpace
       , "mode=" ++ show presentMode
-      , "extent=" ++ show extent
+      , "extent=" ++ show swapExtent
       , "imagecount=" ++ show imageCount
       ]
     )
-  swapchain
-    device
-    graphicsFamily
-    presentFamily
-    surface
-    surfaceFormat
-    colorSpace
-    presentMode
-    imageCount
-    extent
-    (getField @"currentTransform" surfaceCaps)
+  chain <-
+    swapchain
+      device
+      graphicsFamily
+      presentFamily
+      surface
+      surfaceFormat
+      colorSpace
+      presentMode
+      imageCount
+      swapExtent
+      (getField @"currentTransform" surfaceCaps)
+  return (chain, surfaceFormat)
 
 pickSurfaceFormat :: [VkSurfaceFormatKHR] -> IO (VkFormat, VkColorSpaceKHR)
 pickSurfaceFormat surfaceFormats =
@@ -717,7 +726,7 @@ swapchain
     colorSpace
     presentMode
     imageCount
-    extent
+    swapExtent
     transform =
   managed $
     bracket
@@ -730,7 +739,7 @@ swapchain
           colorSpace
           presentMode
           imageCount
-          extent
+          swapExtent
           transform
        )
        ( destroySwapchain device )
@@ -756,7 +765,7 @@ createSwapchain
     colorSpace
     presentMode
     imageCount
-    extent
+    swapExtent
     transform =
   withPtr createInfo $ \ciPtr ->
     allocaPeek
@@ -772,7 +781,7 @@ createSwapchain
       &* set        @"minImageCount" imageCount
       &* set        @"imageFormat" surfaceFormat
       &* set        @"imageColorSpace" colorSpace
-      &* set        @"imageExtent" extent
+      &* set        @"imageExtent" swapExtent
       &* set        @"imageArrayLayers" 1
       &* set        @"imageUsage" VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
       &* set        @"preTransform" transform
@@ -797,6 +806,215 @@ destroySwapchain
 destroySwapchain device chain =
   vkDestroySwapchainKHR device chain VK_NULL
     <* logMsg "Destroyed swapchain"
+
+getSwapchainImages
+  :: MonadIO m
+  => VkDevice
+  -> VkSwapchainKHR
+  -> m [VkImage]
+getSwapchainImages device chain = liftIO $
+  fetchAllMsg
+    "getSwapchainImages: Failed to get swapchain images."
+    (vkGetSwapchainImagesKHR device chain)
+
+imageView
+  :: VkDevice
+  -> VkFormat
+  -> VkImage
+  -> Managed VkImageView
+imageView device imageFormat image =
+  managed $
+    bracket
+      ( createImageView
+          device
+          image
+          imageFormat
+       )
+       ( destroyImageView device )
+
+createImageView
+  :: VkDevice
+  -> VkImage
+  -> VkFormat
+  -> IO VkImageView
+createImageView device image imageFormat =
+  withPtr createInfo $ \ciPtr ->
+    allocaPeek
+    ( vkCreateImageView device ciPtr VK_NULL
+        >=> throwVkResult "vkCreateCreateImageView: Failed to create image view."
+    )
+    <* logMsg "Created image view"
+  where
+    components = createVk @VkComponentMapping
+      $  set        @"r" VK_COMPONENT_SWIZZLE_IDENTITY
+      &* set        @"g" VK_COMPONENT_SWIZZLE_IDENTITY
+      &* set        @"b" VK_COMPONENT_SWIZZLE_IDENTITY
+      &* set        @"a" VK_COMPONENT_SWIZZLE_IDENTITY
+
+    subresourceRange = createVk @VkImageSubresourceRange
+      $  set        @"aspectMask" VK_IMAGE_ASPECT_COLOR_BIT
+      &*  set       @"baseMipLevel" 0
+      &*  set       @"levelCount" 1
+      &*  set       @"baseArrayLayer" 0
+      &*  set       @"layerCount" 1
+
+    createInfo = createVk @VkImageViewCreateInfo
+      $  set        @"sType" VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
+      &* set        @"pNext" VK_NULL
+      &* set        @"image" image
+      &* set        @"viewType" VK_IMAGE_VIEW_TYPE_2D
+      &* set        @"format" imageFormat
+      &* set        @"components" components
+      &* set        @"subresourceRange" subresourceRange
+
+destroyImageView
+  :: VkDevice
+  -> VkImageView
+  -> IO ()
+destroyImageView device view =
+  vkDestroyImageView device view VK_NULL
+    <* logMsg "Destroyed image view"
+
+loadShader
+  :: VkDevice
+  -> FilePath
+  -> Managed VkShaderModule
+loadShader device srcFile =
+  managed $
+    bracket
+      ( createShaderModule device srcFile )
+      ( destroyShaderModule device)
+
+createShaderModule
+  :: VkDevice
+  -> FilePath
+  -> IO VkShaderModule
+createShaderModule device srcFile = do
+  bytes <-
+    liftIO ( Data.ByteString.readFile srcFile )
+  Data.ByteString.useAsCStringLen bytes $ \( bytesPtr, len ) ->
+    withPtr (createInfo bytesPtr len) $ \ciPtr ->
+      allocaPeek
+      ( vkCreateShaderModule device ciPtr VK_NULL
+          >=> throwVkResult "vkCreateShaderModule: Failed to create image view."
+      )
+        <* logMsg ("Created shader module from " ++ srcFile)
+  where
+    createInfo bytesPtr len = createVk @VkShaderModuleCreateInfo
+      $  set @"sType" VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO
+      &* set @"pNext" VK_NULL
+      &* set @"flags" 0
+      &* set @"pCode" ( castPtr bytesPtr )
+      &* set @"codeSize" ( fromIntegral len )
+
+destroyShaderModule
+  :: VkDevice
+  -> VkShaderModule
+  -> IO ()
+destroyShaderModule device shaderModule =
+  vkDestroyShaderModule device shaderModule VK_NULL
+    <* logMsg "Destroyed shader module"
+
+createGraphicsPipeline
+  :: VkDevice
+  -> VkExtent2D
+  -> Managed ()
+createGraphicsPipeline device chainExtent = do
+  vertexShader   <- loadShader device "shaders/vert.spv"
+  fragmentShader <- loadShader device "shaders/frag.spv"
+  return ()
+  -- vertexShaderStageInfo vertexShader
+  -- fragmentShaderStageInfo fragmentShader
+  -- viewport 0 0 (getField @"width" extent) (getField @"height" extent) 0 1
+
+  where
+    vertexShaderStageInfo shaderModule =
+      createVk @VkPipelineShaderStageCreateInfo
+        $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO
+        &* set        @"pNext" VK_NULL
+        &* set        @"flags" 0
+        &* set        @"stage" VK_SHADER_STAGE_VERTEX_BIT
+        &* set        @"module" shaderModule
+        &* setStrRef  @"pName" "main"
+        &* set        @"pSpecializationInfo" VK_NULL
+
+    fragmentShaderStageInfo shaderModule =
+      createVk @VkPipelineShaderStageCreateInfo
+        $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO
+        &* set        @"pNext" VK_NULL
+        &* set        @"flags" 0
+        &* set        @"stage" VK_SHADER_STAGE_FRAGMENT_BIT
+        &* set        @"module" shaderModule
+        &* setStrRef  @"pName" "main"
+        &* set        @"pSpecializationInfo" VK_NULL
+
+    vertexInputInfo =
+      createVk @VkPipelineVertexInputStateCreateInfo
+        $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+        &* set        @"pNext" VK_NULL
+        &* set        @"flags" 0
+        &* set        @"vertexBindingDescriptionCount" 0
+        &* set        @"pVertexBindingDescriptions" VK_NULL
+        &* set        @"vertexAttributeDescriptionCount" 0
+        &* set        @"pVertexAttributeDescriptions" VK_NULL
+
+    inputAssembly =
+      createVk @VkPipelineInputAssemblyStateCreateInfo
+        $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO
+        &* set        @"pNext" VK_NULL
+        &* set        @"flags" 0
+        &* set        @"topology" VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+        &* set        @"primitiveRestartEnable" VK_FALSE
+
+    viewport x y width height minDepth maxDepth =
+      createVk @VkViewport
+        $  set        @"x"  x
+        &* set        @"y"  y
+        &* set        @"width" width
+        &* set        @"height" height
+        &* set        @"minDepth" minDepth
+        &* set        @"maxDepth" maxDepth
+
+    offset x y =
+      createVk @VkOffset2D
+        $  set @"x" x
+        &* set @"y" y
+
+    extent width height =
+      createVk @VkExtent2D
+        $  set @"width" width
+        &* set @"height" height
+
+    scissor offset_ extent_ =
+      createVk @VkRect2D
+        $  set        @"offset" offset_
+        &* set        @"extent" extent_
+
+    viewportState viewports scissors =
+      createVk @VkPipelineViewportStateCreateInfo
+        $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO
+        &* set        @"pNext" VK_NULL
+        &* set        @"flags" 0
+        &* set        @"viewportCount" (fromIntegral $ length viewports)
+        &* setListRef @"pViewports" viewports
+        &* set        @"scissorCount" (fromIntegral $ length scissors)
+        &* setListRef @"pScissors" scissors
+
+    rasterizer =
+      createVk @VkPipelineRasterizationStateCreateInfo
+        $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO
+        &* set        @"pNext" VK_NULL
+        &* set        @"flags" 0
+        &* set        @"depthClampEnable" VK_FALSE
+        &* set        @"rasterizerDiscardEnable" VK_FALSE
+        &* set        @"polygonMode" VK_POLYGON_MODE_FILL
+        &* set        @"lineWidth" 1
+        &* set        @"cullMode" VK_CULL_MODE_BACK_BIT
+        &* set        @"frontFace" VK_FRONT_FACE_CLOCKWISE
+        &* set        @"depthBiasEnable" VK_FALSE
+        &* set        @"depthBiasConstantFactor" 0
+        &* set        @"depthBiasClamp" 0
+        &* set        @"depthBiasSlopeFactor" 0
 
 throwGLFW :: MonadIO m => String -> Bool -> m ()
 throwGLFW msg bool = liftIO $
