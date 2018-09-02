@@ -47,7 +47,11 @@ test = runManaged $ do
   graphicsFamily
               <- findGraphicsQueueFamilyIndex queues
   presentFamily
-              <- findPresentQueueFamilyIndex vkInstance pDevice queues
+              <- findPresentQueueFamilyIndex
+                   vkInstance
+                   pDevice
+                   surface
+                   queues
   device      <- logicalDevice
                    pDevice
                    extensions
@@ -332,7 +336,7 @@ logSurfaceCapabilities caps =
   logMsg $ unwords [ "Surface Capabilities:", unwords [minImageCount, maxImageCount] ]
   where
     minImageCount = "minImageCount=" ++ show (getField @"minImageCount" caps)
-    maxImageCount = "minImageCount=" ++ show (getField @"maxImageCount" caps)
+    maxImageCount = "maxImageCount=" ++ show (getField @"maxImageCount" caps)
 
 getPhysicalDeviceSurfaceFormats
   :: VkPhysicalDevice
@@ -380,10 +384,11 @@ findPresentQueueFamilyIndex
   :: MonadIO m
   => VkInstance
   -> VkPhysicalDevice
+  -> VkSurfaceKHR
   -> [VkQueueFamilyProperties]
   -> m Word32
-findPresentQueueFamilyIndex vkInstance physicalDevice queues = liftIO $ do
-  families <- filterM (isPresentQueueFamily . fst) (zip [0..] queues)
+findPresentQueueFamilyIndex vkInstance physicalDevice surface queues = liftIO $ do
+  families <- filterM (isSuitableFamily . fst) (zip [0..] queues)
   case headMay families of
     Just (queueFamilyIndex, _) -> do
       logMsg ("Picked present queue family #" ++ show queueFamilyIndex)
@@ -391,10 +396,20 @@ findPresentQueueFamilyIndex vkInstance physicalDevice queues = liftIO $ do
     Nothing ->
       throwVkMsg "No suitable present queue family!"
   where
+    isSuitableFamily familyIndex =
+      (&&) <$> isPresentQueueFamily familyIndex
+           <*> canPresentSurface physicalDevice familyIndex surface
     isPresentQueueFamily =
       GLFW.getPhysicalDevicePresentationSupport
         vkInstance
         physicalDevice
+
+canPresentSurface :: VkPhysicalDevice -> Word32 -> VkSurfaceKHR -> IO Bool
+canPresentSurface physicalDevice familyIndex surface =
+  (== VK_TRUE) <$> allocaPeek
+  ( vkGetPhysicalDeviceSurfaceSupportKHR physicalDevice familyIndex surface
+      >=> throwVkResult "vkGetPhysicalDeviceSurfaceSupportKHR: Failed to get surface support."
+  )
 
 physicalDeviceProperties :: VkPhysicalDevice -> IO VkPhysicalDeviceProperties
 physicalDeviceProperties = allocaPeek . vkGetPhysicalDeviceProperties
