@@ -36,48 +36,57 @@ logMsg = liftIO . putStrLn
 test :: IO ()
 test = runManaged $ do
   glfw
-  glfwReqExts <- requiredGLFWExtensions
-  vkInstance  <- vulkanInstance
-                   "vulkan-test"
-                   "vulkan-test"
-                   glfwReqExts
-                   layers
-  window      <- windowTitled winWidth winHeight "vulkan-test"
-  surface     <- windowSurface vkInstance window
+  glfwReqExts     <- requiredGLFWExtensions
+  vkInstance      <- vulkanInstance
+                       "vulkan-test"
+                       "vulkan-test"
+                       glfwReqExts
+                       layers
+  window          <- windowTitled winWidth winHeight "vulkan-test"
+  surface         <- windowSurface vkInstance window
   (pDevice, queues, surfaceCaps, surfaceFormats, presentModes)
-              <- pickPhysicalDevice vkInstance surface extensions
-  graphicsFamily
-              <- findGraphicsQueueFamilyIndex queues
-  presentFamily
-              <- findPresentQueueFamilyIndex
-                   vkInstance
-                   pDevice
-                   surface
-                   queues
-  device      <- logicalDevice
-                   pDevice
-                   extensions
-                   layers
-                   graphicsFamily
+                  <- pickPhysicalDevice vkInstance surface extensions
+  graphicsFamily  <- findGraphicsQueueFamilyIndex queues
+  presentFamily   <- findPresentQueueFamilyIndex
+                       vkInstance
+                       pDevice
+                       surface
+                       queues
+  device          <- logicalDevice
+                       pDevice
+                       extensions
+                       layers
+                       graphicsFamily
   (chain, chainFormat, swapExtent)
-              <- pickSwapchain
-                   device
-                   graphicsFamily
-                   presentFamily
-                   surface
-                   surfaceCaps
-                   surfaceFormats
-                   presentModes
-                   winWidth
-                   winHeight
-  swapImages  <- getSwapchainImages
-                   device
-                   chain
-  swapViews   <- mapM (imageView device chainFormat) swapImages
-  pipeline    <- createGraphicsPipeline
-                   device
-                   chainFormat
-                   swapExtent
+                  <- pickSwapchain
+                       device
+                       graphicsFamily
+                       presentFamily
+                       surface
+                       surfaceCaps
+                       surfaceFormats
+                       presentModes
+                       winWidth
+                       winHeight
+  views           <- imageViews
+                       device
+                       chain
+                       chainFormat
+  (pipeline, rpass)
+                  <- createGraphicsPipeline
+                       device
+                       chainFormat
+                       swapExtent
+  framebuffers    <- createFramebuffers
+                       device
+                       rpass
+                       swapExtent
+                       views
+  graphicsCommandPool
+                  <- commandPool
+                       device
+                       graphicsFamily
+
 
   return ()
   where
@@ -812,6 +821,13 @@ destroySwapchain device chain =
   vkDestroySwapchainKHR device chain VK_NULL
     <* logMsg "Destroyed swapchain"
 
+imageViews :: VkDevice -> VkSwapchainKHR -> VkFormat -> Managed [VkImageView]
+imageViews device chain chainFormat = do
+  swapImages  <- getSwapchainImages
+                   device
+                   chain
+  mapM (imageView device chainFormat) swapImages
+
 getSwapchainImages
   :: MonadIO m
   => VkDevice
@@ -924,7 +940,7 @@ createGraphicsPipeline
   :: VkDevice
   -> VkFormat
   -> VkExtent2D
-  -> Managed VkPipeline
+  -> Managed (VkPipeline, VkRenderPass)
 createGraphicsPipeline device format swapExtent = do
   vertexShader   <- loadShader device "shaders/vert.spv"
   fragmentShader <- loadShader device "shaders/frag.spv"
@@ -934,7 +950,8 @@ createGraphicsPipeline device format swapExtent = do
       fragmentStage = fragmentShaderStageInfo fragmentShader
       vp = viewport 0 0 (fromIntegral $ getField @"width" swapExtent) (fromIntegral $ getField @"height" swapExtent) 0 1
       ss = scissor (offset 0 0) swapExtent
-  graphicsPipeline device (pipelineInfo [vertexStage, fragmentStage] (viewportState [vp] [ss]) layout rpass)
+  pipeline <- graphicsPipeline device (pipelineInfo [vertexStage, fragmentStage] (viewportState [vp] [ss]) layout rpass)
+  return (pipeline, rpass)
 
   where
     vertexShaderStageInfo shaderModule =
@@ -1066,7 +1083,7 @@ createGraphicsPipeline device format swapExtent = do
         &* setAt      @"blendConstants" @2 0
         &* setAt      @"blendConstants" @3 0
 
-    pipelineInfo stages viewportState layout rpass =
+    pipelineInfo stages viewportState_ layout rpass =
       createVk @VkGraphicsPipelineCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO
         &* set        @"pNext" VK_NULL
@@ -1075,7 +1092,7 @@ createGraphicsPipeline device format swapExtent = do
         &* setListRef @"pStages" stages
         &* setVkRef   @"pVertexInputState" vertexInputInfo
         &* setVkRef   @"pInputAssemblyState" inputAssembly
-        &* setVkRef   @"pViewportState" viewportState
+        &* setVkRef   @"pViewportState" viewportState_
         &* setVkRef   @"pRasterizationState" rasterizer
         &* setVkRef   @"pMultisampleState" multisampling
         &* set        @"pDepthStencilState" VK_NULL
@@ -1144,7 +1161,7 @@ renderPass device format =
   managed $
     bracket
       ( createRenderPass device format )
-      ( destroyRenderPass device)
+      ( destroyRenderPass device )
 
 createRenderPass :: VkDevice -> VkFormat -> IO VkRenderPass
 createRenderPass device format =
@@ -1200,6 +1217,89 @@ destroyRenderPass :: VkDevice -> VkRenderPass -> IO ()
 destroyRenderPass device rpass =
   vkDestroyRenderPass device rpass VK_NULL
     <* logMsg "Destroyed render pass"
+
+framebuffer
+  :: VkDevice
+  -> VkRenderPass
+  -> VkExtent2D
+  -> [VkImageView]
+  -> Managed VkFramebuffer
+framebuffer device rpass extent_ attachments =
+  managed $
+    bracket
+      ( createFramebuffer
+          device
+          rpass
+          extent_
+          attachments
+      )
+      ( destroyFramebuffer device )
+
+createFramebuffer
+  :: VkDevice
+  -> VkRenderPass
+  -> VkExtent2D
+  -> [VkImageView]
+  -> IO VkFramebuffer
+createFramebuffer device rpass extent_ attachments =
+  withPtr createInfo $ \ciPtr ->
+    allocaPeek
+    ( vkCreateFramebuffer device ciPtr VK_NULL
+        >=> throwVkResult "vkCreateFramebuffer: Failed to create framebuffer."
+    )
+    <* logMsg "Created framebuffer"
+  where
+    createInfo = createVk @VkFramebufferCreateInfo
+      $  set           @"sType" VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO
+      &* set           @"pNext" VK_NULL
+      &* set           @"flags" 0
+      &* set           @"renderPass" rpass
+      &* set           @"attachmentCount" (fromIntegral $ length attachments)
+      &* setListRef    @"pAttachments" attachments
+      &* set           @"width" (getField @"width" extent_)
+      &* set           @"height" (getField @"height" extent_)
+      &* set           @"layers" 1
+
+destroyFramebuffer :: VkDevice -> VkFramebuffer -> IO ()
+destroyFramebuffer device framebuffer_ =
+  vkDestroyFramebuffer device framebuffer_ VK_NULL
+    <* logMsg "Destroyed framebuffer"
+
+createFramebuffers
+  :: VkDevice
+  -> VkRenderPass
+  -> VkExtent2D
+  -> [VkImageView]
+  -> Managed [VkFramebuffer]
+createFramebuffers device rpass extent_ =
+  mapM (\attachment -> framebuffer device rpass extent_ [attachment])
+
+commandPool :: VkDevice -> Word32 -> Managed VkCommandPool
+commandPool device familyIndex =
+  managed $
+    bracket
+      ( createCommandPool device familyIndex )
+      ( destroyCommandPool device )
+
+createCommandPool :: VkDevice -> Word32 -> IO VkCommandPool
+createCommandPool device familyIndex =
+  withPtr createInfo $ \ciPtr ->
+    allocaPeek
+    ( vkCreateCommandPool device ciPtr VK_NULL
+        >=> throwVkResult "vkCreateCommandPool: Failed to create command pool."
+    )
+    <* logMsg "Created command pool"
+  where
+    createInfo = createVk @VkCommandPoolCreateInfo
+      $  set           @"sType" VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO
+      &* set           @"pNext" VK_NULL
+      &* set           @"flags" 0
+      &* set           @"queueFamilyIndex" familyIndex
+
+destroyCommandPool :: VkDevice -> VkCommandPool -> IO ()
+destroyCommandPool device pool =
+  vkDestroyCommandPool device pool VK_NULL
+    <* logMsg "Destroyed framebuffer"
 
 throwGLFW :: MonadIO m => String -> Bool -> m ()
 throwGLFW msg bool = liftIO $
