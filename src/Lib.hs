@@ -1,6 +1,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds           #-}
 {-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE NegativeLiterals    #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications    #-}
 {-# LANGUAGE TypeFamilies        #-}
@@ -58,7 +59,7 @@ test = runManaged $ do
                    extensions
                    layers
                    graphicsFamily
-  (chain, chainFormat)
+  (chain, chainFormat, swapExtent)
               <- pickSwapchain
                    device
                    graphicsFamily
@@ -73,6 +74,10 @@ test = runManaged $ do
                    device
                    chain
   swapViews   <- mapM (imageView device chainFormat) swapImages
+  pipeline    <- createGraphicsPipeline
+                   device
+                   chainFormat
+                   swapExtent
 
   return ()
   where
@@ -585,7 +590,7 @@ pickSwapchain
   -> [VkPresentModeKHR]
   -> Word32
   -> Word32
-  -> Managed (VkSwapchainKHR, VkFormat)
+  -> Managed (VkSwapchainKHR, VkFormat, VkExtent2D)
 pickSwapchain
     device
     graphicsFamily
@@ -621,7 +626,7 @@ pickSwapchain
       imageCount
       swapExtent
       (getField @"currentTransform" surfaceCaps)
-  return (chain, surfaceFormat)
+  return (chain, surfaceFormat, swapExtent)
 
 pickSurfaceFormat :: [VkSurfaceFormatKHR] -> IO (VkFormat, VkColorSpaceKHR)
 pickSurfaceFormat surfaceFormats =
@@ -917,15 +922,19 @@ destroyShaderModule device shaderModule =
 
 createGraphicsPipeline
   :: VkDevice
+  -> VkFormat
   -> VkExtent2D
-  -> Managed ()
-createGraphicsPipeline device chainExtent = do
+  -> Managed VkPipeline
+createGraphicsPipeline device format swapExtent = do
   vertexShader   <- loadShader device "shaders/vert.spv"
   fragmentShader <- loadShader device "shaders/frag.spv"
-  return ()
-  -- vertexShaderStageInfo vertexShader
-  -- fragmentShaderStageInfo fragmentShader
-  -- viewport 0 0 (getField @"width" extent) (getField @"height" extent) 0 1
+  rpass          <- renderPass device format
+  layout         <- pipelineLayout device
+  let vertexStage = vertexShaderStageInfo vertexShader
+      fragmentStage = fragmentShaderStageInfo fragmentShader
+      vp = viewport 0 0 (fromIntegral $ getField @"width" swapExtent) (fromIntegral $ getField @"height" swapExtent) 0 1
+      ss = scissor (offset 0 0) swapExtent
+  graphicsPipeline device (pipelineInfo [vertexStage, fragmentStage] (viewportState [vp] [ss]) layout rpass)
 
   where
     vertexShaderStageInfo shaderModule =
@@ -1015,6 +1024,182 @@ createGraphicsPipeline device chainExtent = do
         &* set        @"depthBiasConstantFactor" 0
         &* set        @"depthBiasClamp" 0
         &* set        @"depthBiasSlopeFactor" 0
+
+    multisampling =
+      createVk @VkPipelineMultisampleStateCreateInfo
+        $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO
+        &* set        @"pNext" VK_NULL
+        &* set        @"flags" 0
+        &* set        @"sampleShadingEnable" VK_FALSE
+        &* set        @"rasterizationSamples" VK_SAMPLE_COUNT_1_BIT
+        &* set        @"minSampleShading" 1.0
+        &* set        @"pSampleMask" VK_NULL
+        &* set        @"alphaToCoverageEnable" VK_FALSE
+        &* set        @"alphaToOneEnable" VK_FALSE
+
+    colorBlendAttachment =
+      createVk @VkPipelineColorBlendAttachmentState
+        $  set        @"colorWriteMask" (   VK_COLOR_COMPONENT_R_BIT
+                                        .|. VK_COLOR_COMPONENT_G_BIT
+                                        .|. VK_COLOR_COMPONENT_B_BIT
+                                        .|. VK_COLOR_COMPONENT_A_BIT
+                                        )
+        &* set        @"blendEnable" VK_FALSE
+        &* set        @"srcColorBlendFactor" VK_BLEND_FACTOR_ONE
+        &* set        @"dstColorBlendFactor" VK_BLEND_FACTOR_ZERO
+        &* set        @"colorBlendOp" VK_BLEND_OP_ADD
+        &* set        @"srcAlphaBlendFactor" VK_BLEND_FACTOR_ONE
+        &* set        @"dstAlphaBlendFactor" VK_BLEND_FACTOR_ZERO
+        &* set        @"alphaBlendOp" VK_BLEND_OP_ADD
+
+    colorBlending =
+      createVk @VkPipelineColorBlendStateCreateInfo
+        $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
+        &* set        @"pNext" VK_NULL
+        &* set        @"flags" 0
+        &* set        @"logicOpEnable" VK_FALSE
+        &* set        @"logicOp" VK_LOGIC_OP_COPY
+        &* set        @"attachmentCount" 1
+        &* setListRef @"pAttachments" [colorBlendAttachment]
+        &* setAt      @"blendConstants" @0 0
+        &* setAt      @"blendConstants" @1 0
+        &* setAt      @"blendConstants" @2 0
+        &* setAt      @"blendConstants" @3 0
+
+    pipelineInfo stages viewportState layout rpass =
+      createVk @VkGraphicsPipelineCreateInfo
+        $  set        @"sType" VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO
+        &* set        @"pNext" VK_NULL
+        &* set        @"flags" 0
+        &* set        @"stageCount" (fromIntegral $ length stages)
+        &* setListRef @"pStages" stages
+        &* setVkRef   @"pVertexInputState" vertexInputInfo
+        &* setVkRef   @"pInputAssemblyState" inputAssembly
+        &* setVkRef   @"pViewportState" viewportState
+        &* setVkRef   @"pRasterizationState" rasterizer
+        &* setVkRef   @"pMultisampleState" multisampling
+        &* set        @"pDepthStencilState" VK_NULL
+        &* setVkRef   @"pColorBlendState" colorBlending
+        &* set        @"pDynamicState" VK_NULL
+        &* set        @"layout" layout
+        &* set        @"renderPass" rpass
+        &* set        @"subpass" 0
+        &* set        @"basePipelineHandle" VK_NULL_HANDLE
+        &* set        @"basePipelineIndex" -1
+
+graphicsPipeline :: VkDevice -> VkGraphicsPipelineCreateInfo -> Managed VkPipeline
+graphicsPipeline device pipelineInfo =
+  managed $
+    bracket
+      ( createGraphicsPipelines device pipelineInfo )
+      ( destroyPipeline device )
+
+createGraphicsPipelines :: VkDevice -> VkGraphicsPipelineCreateInfo -> IO VkPipeline
+createGraphicsPipelines device pipelineInfo =
+  withPtr pipelineInfo $ \ciPtr ->
+    allocaPeek
+    ( vkCreateGraphicsPipelines device VK_NULL 1 ciPtr VK_NULL
+        >=> throwVkResult "vkCreateGraphicsPipelines: Failed to create graphics pipelines."
+    )
+    <* logMsg "Created graphics pipeline"
+
+destroyPipeline :: VkDevice -> VkPipeline -> IO ()
+destroyPipeline device pipeline =
+  vkDestroyPipeline device pipeline VK_NULL
+    <* logMsg "Destroyed graphics pipeline"
+
+pipelineLayout :: VkDevice -> Managed VkPipelineLayout
+pipelineLayout device =
+  managed $
+    bracket
+      ( createPipelineLayout device )
+      ( destroyPipelineLayout device)
+
+createPipelineLayout :: VkDevice -> IO VkPipelineLayout
+createPipelineLayout device =
+  withPtr createInfo $ \ciPtr ->
+    allocaPeek
+    ( vkCreatePipelineLayout device ciPtr VK_NULL
+        >=> throwVkResult "vkCreatePipelineLayout: Failed to create pipeline layout."
+    )
+    <* logMsg "Created pipeline layout"
+  where
+    createInfo =
+      createVk @VkPipelineLayoutCreateInfo
+        $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
+        &* set        @"pNext" VK_NULL
+        &* set        @"flags" 0
+        &* set        @"setLayoutCount" 0
+        &* set        @"pSetLayouts" VK_NULL
+        &* set        @"pushConstantRangeCount" 0
+        &* set        @"pPushConstantRanges" VK_NULL
+
+destroyPipelineLayout :: VkDevice -> VkPipelineLayout -> IO ()
+destroyPipelineLayout device layout =
+  vkDestroyPipelineLayout device layout VK_NULL
+    <* logMsg "Destroyed pipeline layout"
+
+renderPass :: VkDevice -> VkFormat -> Managed VkRenderPass
+renderPass device format =
+  managed $
+    bracket
+      ( createRenderPass device format )
+      ( destroyRenderPass device)
+
+createRenderPass :: VkDevice -> VkFormat -> IO VkRenderPass
+createRenderPass device format =
+  withPtr createInfo $ \ciPtr ->
+    allocaPeek
+    ( vkCreateRenderPass device ciPtr VK_NULL
+        >=> throwVkResult "vkCreateRenderPass: Failed to create render pass."
+    )
+    <* logMsg "Created render pass"
+  where
+    colorAttachment =
+      createVk @VkAttachmentDescription
+        $  set        @"format" format
+        &* set        @"samples" VK_SAMPLE_COUNT_1_BIT
+        &* set        @"loadOp" VK_ATTACHMENT_LOAD_OP_CLEAR
+        &* set        @"storeOp" VK_ATTACHMENT_STORE_OP_STORE
+        &* set        @"stencilLoadOp" VK_ATTACHMENT_LOAD_OP_DONT_CARE
+        &* set        @"stencilStoreOp" VK_ATTACHMENT_STORE_OP_DONT_CARE
+        &* set        @"initialLayout" VK_IMAGE_LAYOUT_UNDEFINED
+        &* set        @"finalLayout" VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+
+    colorAttachmentRef =
+      createVk @VkAttachmentReference
+        $  set        @"attachment" 0
+        &* set        @"layout" VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+
+    subpass =
+      createVk @VkSubpassDescription
+        $  set        @"flags" 0
+        &* set        @"pipelineBindPoint" VK_PIPELINE_BIND_POINT_GRAPHICS
+        &* set        @"inputAttachmentCount" 0
+        &* set        @"pInputAttachments" VK_NULL
+        &* set        @"colorAttachmentCount" 1
+        &* setListRef @"pColorAttachments" [colorAttachmentRef]
+        &* set        @"pResolveAttachments" VK_NULL
+        &* set        @"pDepthStencilAttachment" VK_NULL
+        &* set        @"preserveAttachmentCount" 0
+        &* set        @"pPreserveAttachments" VK_NULL
+
+    createInfo =
+      createVk @VkRenderPassCreateInfo
+        $  set        @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO
+        &* set        @"pNext" VK_NULL
+        &* set        @"flags" 0
+        &* set        @"attachmentCount" 1
+        &* setListRef @"pAttachments" [colorAttachment]
+        &* set        @"subpassCount" 1
+        &* setListRef @"pSubpasses" [subpass]
+        &* set        @"dependencyCount" 0
+        &* set        @"pDependencies" VK_NULL
+
+destroyRenderPass :: VkDevice -> VkRenderPass -> IO ()
+destroyRenderPass device rpass =
+  vkDestroyRenderPass device rpass VK_NULL
+    <* logMsg "Destroyed render pass"
 
 throwGLFW :: MonadIO m => String -> Bool -> m ()
 throwGLFW msg bool = liftIO $
