@@ -57,7 +57,9 @@ test = runManaged $ do
                        extensions
                        layers
                        graphicsFamily
-  (chain, chainFormat, swapExtent)
+  graphicsQueue   <- liftIO $ getDeviceQueue device graphicsFamily 0
+  presentQueue    <- liftIO $ getDeviceQueue device presentFamily 0
+  (swapChain, chainFormat, swapExtent)
                   <- pickSwapchain
                        device
                        graphicsFamily
@@ -70,7 +72,7 @@ test = runManaged $ do
                        winHeight
   views           <- imageViews
                        device
-                       chain
+                       swapChain
                        chainFormat
   (pipeline, rpass)
                   <- createGraphicsPipeline
@@ -93,13 +95,155 @@ test = runManaged $ do
                        rpass
                        swapExtent
                        pipeline
+  imageAvailableSemaphore <- semaphore device
+  renderFinishedSemaphore <- semaphore device
 
-  return ()
+  mainloop
+    device
+    swapChain
+    graphicsQueue
+    presentQueue
+    commandBuffers
+    imageAvailableSemaphore
+    renderFinishedSemaphore
+    window
   where
     extensions = [VK_KHR_SWAPCHAIN_EXTENSION_NAME]
     layers = ["VK_LAYER_LUNARG_standard_validation"]
     winWidth = 640
     winHeight = 360
+
+mainloop
+  :: VkDevice
+  -> VkSwapchainKHR
+  -> VkQueue
+  -> VkQueue
+  -> [VkCommandBuffer]
+  -> VkSemaphore
+  -> VkSemaphore
+  -> GLFW.Window
+  -> Managed ()
+mainloop
+  device
+  swapChain
+  commandBuffers
+  graphicsQueue
+  presentQueue
+  imageAvailableSemaphore
+  renderFinishedSemaphore
+  window = do
+    go
+    deviceWaitIdle device
+  where
+    go = do
+      liftIO GLFW.pollEvents
+      shouldClose <- liftIO $ GLFW.windowShouldClose window
+      unless shouldClose $ do
+        drawFrame
+          device
+          swapChain
+          commandBuffers
+          graphicsQueue
+          presentQueue
+          imageAvailableSemaphore
+          renderFinishedSemaphore
+          window
+        go
+
+deviceWaitIdle :: MonadIO m => VkDevice -> m ()
+deviceWaitIdle device = liftIO $
+  vkDeviceWaitIdle device
+   >>= throwVkResult "vkDeviceWaitIdel: Failed to wait for idle."
+
+drawFrame
+  :: VkDevice
+  -> VkSwapchainKHR
+  -> VkQueue
+  -> VkQueue
+  -> [VkCommandBuffer]
+  -> VkSemaphore
+  -> VkSemaphore
+  -> GLFW.Window
+  -> Managed ()
+drawFrame
+  device
+  swapChain
+  graphicsQueue
+  presentQueue
+  commandBuffers
+  imageAvailableSemaphore
+  renderFinishedSemaphore
+  _window = do
+    imageIndex <- acquireNextImage device swapChain maxBound imageAvailableSemaphore VK_NULL
+    submitQueue
+      graphicsQueue
+      [(imageAvailableSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)]
+      [renderFinishedSemaphore]
+      [commandBuffers !! fromIntegral imageIndex]
+    present presentQueue [swapChain] [renderFinishedSemaphore] [imageIndex]
+    deviceWaitIdle device
+
+present
+ :: VkQueue
+ -> [VkSwapchainKHR]
+ -> [VkSemaphore]
+ -> [Word32]
+ -> Managed ()
+present queue swapChains wait imageIndices = liftIO $
+  withPtr presentInfo $
+    vkQueuePresentKHR queue
+      >=> throwVkResult "vkQueuePresentKHR: Failed to submit present request."
+  where
+    presentInfo = createVk @VkPresentInfoKHR
+      $  set           @"sType" VK_STRUCTURE_TYPE_PRESENT_INFO_KHR
+      &* set           @"pNext" VK_NULL
+      &* set           @"waitSemaphoreCount" (fromIntegral $ length wait)
+      &* setListRef    @"pWaitSemaphores" wait
+      &* set           @"swapchainCount" (fromIntegral $ length swapChains)
+      &* setListRef    @"pSwapchains" swapChains
+      &* setListRef    @"pImageIndices" imageIndices
+      &* set           @"pResults" VK_NULL
+
+submitQueue
+ :: VkQueue
+ -> [(VkSemaphore, VkPipelineStageFlags)]
+ -> [VkSemaphore]
+ -> [VkCommandBuffer]
+ -> Managed ()
+submitQueue queue waits signal buffers = liftIO $
+  withPtr submitInfo $ \siPtr ->
+    vkQueueSubmit queue 1 siPtr VK_NULL_HANDLE
+      >>= throwVkResult "vkQueueSubmit: Failed to submit queue."
+  where
+    (wait, waitStages) = unzip waits
+    submitInfo = createVk @VkSubmitInfo
+      $  set           @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO
+      &* set           @"pNext" VK_NULL
+      &* set           @"waitSemaphoreCount" (fromIntegral $ length waits)
+      &* setListRef    @"pWaitSemaphores" wait
+      &* setListRef    @"pWaitDstStageMask" waitStages
+      &* set           @"signalSemaphoreCount" (fromIntegral $ length signal)
+      &* setListRef    @"pSignalSemaphores" signal
+      &* set           @"commandBufferCount" (fromIntegral $ length buffers)
+      &* setListRef    @"pCommandBuffers" buffers
+
+acquireNextImage
+  :: VkDevice
+  -> VkSwapchainKHR
+  -> Word64
+  -> VkSemaphore
+  -> VkFence
+  -> Managed Word32
+acquireNextImage device swapChain timeout semaphore_ fence_ = liftIO $
+  allocaPeek
+    ( vkAcquireNextImageKHR
+        device
+        swapChain
+        timeout
+        semaphore_
+        fence_
+        >=> throwVkResult "vkAcquireNextImageKHR: Failed to acquire image."
+    )
 
 glfw :: Managed ()
 glfw =
@@ -436,6 +580,9 @@ findPresentQueueFamilyIndex vkInstance physicalDevice surface queues = liftIO $ 
       GLFW.getPhysicalDevicePresentationSupport
         vkInstance
         physicalDevice
+
+getDeviceQueue :: VkDevice -> Word32 -> Word32 -> IO VkQueue
+getDeviceQueue device familyIndex index = allocaPeek $ vkGetDeviceQueue device familyIndex index
 
 canPresentSurface :: VkPhysicalDevice -> Word32 -> VkSurfaceKHR -> IO Bool
 canPresentSurface physicalDevice familyIndex surface =
@@ -1225,8 +1372,17 @@ createRenderPass device format =
         &* setListRef @"pAttachments" [colorAttachment]
         &* set        @"subpassCount" 1
         &* setListRef @"pSubpasses" [subpass]
-        &* set        @"dependencyCount" 0
-        &* set        @"pDependencies" VK_NULL
+        &* set        @"dependencyCount" 1
+        &* setListRef @"pDependencies" [dependency]
+
+    dependency =
+      createVk @VkSubpassDependency
+        $  set        @"srcSubpass" VK_SUBPASS_EXTERNAL
+        &* set        @"srcStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+        &* set        @"srcAccessMask" 0
+        &* set        @"dstSubpass" 0
+        &* set        @"dstStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+        &* set        @"dstAccessMask" (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT .|. VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
 
 destroyRenderPass :: VkDevice -> VkRenderPass -> IO ()
 destroyRenderPass device rpass =
@@ -1400,6 +1556,32 @@ allocateCommandBuffers device pool bufferCount = liftIO $
       &* set           @"commandPool" pool
       &* set           @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY
       &* set           @"commandBufferCount" (fromIntegral bufferCount)
+
+semaphore :: VkDevice -> Managed VkSemaphore
+semaphore device =
+  managed $
+    bracket
+      ( createSemaphore device )
+      ( destroySemaphore device )
+
+createSemaphore :: VkDevice -> IO VkSemaphore
+createSemaphore device =
+  withPtr createInfo $ \ciPtr ->
+    allocaPeek
+    ( vkCreateSemaphore device ciPtr VK_NULL
+        >=> throwVkResult "vkCreateSemaphore: Failed to create semaphore."
+    )
+    <* logMsg "Created semaphore"
+  where
+    createInfo = createVk @VkSemaphoreCreateInfo
+      $  set           @"sType" VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
+      &* set           @"pNext" VK_NULL
+      &* set           @"flags" 0
+
+destroySemaphore :: VkDevice -> VkSemaphore -> IO ()
+destroySemaphore device sem =
+  vkDestroySemaphore device sem VK_NULL
+    <* logMsg "Destroyed semaphore"
 
 throwGLFW :: MonadIO m => String -> Bool -> m ()
 throwGLFW msg bool = liftIO $
