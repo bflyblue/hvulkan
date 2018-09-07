@@ -86,7 +86,13 @@ test = runManaged $ do
                   <- commandPool
                        device
                        graphicsFamily
-
+  commandBuffers  <- createCommandBuffers
+                       device
+                       graphicsCommandPool
+                       framebuffers
+                       rpass
+                       swapExtent
+                       pipeline
 
   return ()
   where
@@ -147,6 +153,15 @@ allocaPeek action =
     action ptr
     peek ptr
 
+allocaArrayPeek
+  :: Storable a
+  => Int
+  -> (Ptr a -> IO ()) -> IO [a]
+allocaArrayPeek n action =
+  allocaArray n $ \ptr -> do
+    action ptr
+    peekArray n ptr
+
 createVulkanInstance
   :: String
   -> String
@@ -193,9 +208,8 @@ fetchAll f =
     f countPtr VK_NULL_HANDLE
     devCount <- fromIntegral <$> peek countPtr
 
-    allocaArray devCount $ \arrayPtr -> do
-      f countPtr arrayPtr
-      peekArray devCount arrayPtr
+    allocaArrayPeek devCount $
+      f countPtr
 
 fetchAllMsg
   :: (Storable a, Storable b, Integral a)
@@ -208,10 +222,8 @@ fetchAllMsg msg f =
       >>= throwVkResult msg
     devCount <- fromIntegral <$> peek countPtr
 
-    allocaArray devCount $ \arrayPtr -> do
-      f countPtr arrayPtr
-        >>= throwVkResult msg
-      peekArray devCount arrayPtr
+    allocaArrayPeek devCount $
+      f countPtr >=> throwVkResult msg
 
 pickPhysicalDevice
   :: MonadIO m
@@ -686,9 +698,9 @@ pickSwapExtent surfaceCaps width height = do
         hMin = getField @"height" minExtent
         hMax = getField @"height" maxExtent
     return $
-      createVk @VkExtent2D
-        $  set @"width" (clamp wMin wMax width)
-        &* set @"height" (clamp hMin hMax height)
+      extent2D
+        (clamp wMin wMax width)
+        (clamp hMin hMax height)
   else
     return currentExtent
   where
@@ -949,7 +961,7 @@ createGraphicsPipeline device format swapExtent = do
   let vertexStage = vertexShaderStageInfo vertexShader
       fragmentStage = fragmentShaderStageInfo fragmentShader
       vp = viewport 0 0 (fromIntegral $ getField @"width" swapExtent) (fromIntegral $ getField @"height" swapExtent) 0 1
-      ss = scissor (offset 0 0) swapExtent
+      ss = rect2D (offset2D 0 0) swapExtent
   pipeline <- graphicsPipeline device (pipelineInfo [vertexStage, fragmentStage] (viewportState [vp] [ss]) layout rpass)
   return (pipeline, rpass)
 
@@ -1000,21 +1012,6 @@ createGraphicsPipeline device format swapExtent = do
         &* set        @"height" height
         &* set        @"minDepth" minDepth
         &* set        @"maxDepth" maxDepth
-
-    offset x y =
-      createVk @VkOffset2D
-        $  set @"x" x
-        &* set @"y" y
-
-    extent width height =
-      createVk @VkExtent2D
-        $  set @"width" width
-        &* set @"height" height
-
-    scissor offset_ extent_ =
-      createVk @VkRect2D
-        $  set        @"offset" offset_
-        &* set        @"extent" extent_
 
     viewportState viewports scissors =
       createVk @VkPipelineViewportStateCreateInfo
@@ -1103,6 +1100,24 @@ createGraphicsPipeline device format swapExtent = do
         &* set        @"subpass" 0
         &* set        @"basePipelineHandle" VK_NULL_HANDLE
         &* set        @"basePipelineIndex" -1
+
+rect2D :: VkOffset2D -> VkExtent2D -> VkRect2D
+rect2D offset extent =
+  createVk @VkRect2D
+    $  set        @"offset" offset
+    &* set        @"extent" extent
+
+offset2D :: Int32 -> Int32 -> VkOffset2D
+offset2D x y =
+  createVk @VkOffset2D
+    $  set @"x" x
+    &* set @"y" y
+
+extent2D :: Word32 -> Word32 -> VkExtent2D
+extent2D width height =
+  createVk @VkExtent2D
+    $  set @"width" width
+    &* set @"height" height
 
 graphicsPipeline :: VkDevice -> VkGraphicsPipelineCreateInfo -> Managed VkPipeline
 graphicsPipeline device pipelineInfo =
@@ -1299,7 +1314,92 @@ createCommandPool device familyIndex =
 destroyCommandPool :: VkDevice -> VkCommandPool -> IO ()
 destroyCommandPool device pool =
   vkDestroyCommandPool device pool VK_NULL
-    <* logMsg "Destroyed framebuffer"
+    <* logMsg "Destroyed command pool"
+
+createCommandBuffers
+  :: MonadIO m
+  => VkDevice
+  -> VkCommandPool
+  -> [VkFramebuffer]
+  -> VkRenderPass
+  -> VkExtent2D
+  -> VkPipeline
+  -> m [VkCommandBuffer]
+createCommandBuffers device pool frameBuffers rpass extent_ pipeline = liftIO $ do
+  commandBuffers <- allocateCommandBuffers device pool (length frameBuffers)
+
+  forM_ (zip frameBuffers commandBuffers) $ \(frameBuffer_, cmd) -> do
+    beginCommandBuffer cmd VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
+    beginRenderPass cmd frameBuffer_
+    vkCmdBindPipeline cmd VK_PIPELINE_BIND_POINT_GRAPHICS pipeline
+    vkCmdDraw cmd 3 1 0 0
+    vkCmdEndRenderPass cmd
+    endCommandBuffer cmd
+
+  return commandBuffers
+
+  where
+    beginCommandBuffer buffer flags =
+      let
+        beginInfo = createVk @VkCommandBufferBeginInfo
+          $  set           @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+          &* set           @"pNext" VK_NULL
+          &* set           @"flags" flags
+          &* set           @"pInheritanceInfo" VK_NULL
+      in
+        withPtr beginInfo
+          ( vkBeginCommandBuffer buffer
+              >=> throwVkResult "vkBeginCommandBuffer: Failed to begin command buffer."
+          )
+
+    endCommandBuffer buffer =
+      vkEndCommandBuffer buffer
+        >>= throwVkResult "vkEndCommandBuffer: Failed to record command buffer."
+
+    beginRenderPass buffer framebuffer_ =
+      let
+        area = rect2D (offset2D 0 0) extent_
+        clearValue = createVk @VkClearValue
+          $ set            @"color" clearColor
+
+        clearColor = createVk @VkClearColorValue
+          $  setAt         @"float32" @0 0
+          &* setAt         @"float32" @1 0
+          &* setAt         @"float32" @2 1
+          &* setAt         @"float32" @3 1
+
+        renderPassInfo = createVk @VkRenderPassBeginInfo
+          $  set           @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO
+          &* set           @"pNext" VK_NULL
+          &* set           @"renderPass" rpass
+          &* set           @"framebuffer" framebuffer_
+          &* set           @"renderArea" area
+          &* set           @"clearValueCount" 1
+          &* setListRef    @"pClearValues" [clearValue]
+      in
+        withPtr renderPassInfo $ \rpiPtr ->
+          vkCmdBeginRenderPass buffer rpiPtr VK_SUBPASS_CONTENTS_INLINE
+
+allocateCommandBuffers
+  :: MonadIO m
+  => VkDevice
+  -> VkCommandPool
+  -> Int
+  -> m [VkCommandBuffer]
+allocateCommandBuffers device pool bufferCount = liftIO $
+  withPtr allocInfo $ \aiPtr ->
+    allocaArrayPeek bufferCount
+    ( vkAllocateCommandBuffers device aiPtr
+        >=> throwVkResult "vkAllocateCommandBuffers: Failed to allocate command buffers."
+    )
+    <* logMsg "Allocated command buffers"
+  where
+    allocInfo = createVk @VkCommandBufferAllocateInfo
+      $  set           @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO
+      &* set           @"pNext" VK_NULL
+      &* set           @"commandPool" pool
+      &* set           @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY
+      &* set           @"commandBufferCount" (fromIntegral bufferCount)
 
 throwGLFW :: MonadIO m => String -> Bool -> m ()
 throwGLFW msg bool = liftIO $
