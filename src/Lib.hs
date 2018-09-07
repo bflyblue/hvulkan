@@ -13,7 +13,7 @@ module Lib
 import           Control.Exception
 import           Control.Monad
 import           Control.Monad.IO.Class
-import           Control.Monad.Managed
+import           Control.Monad.Trans.Resource
 import           Data.Bits
 import qualified Data.ByteString
 import qualified Data.Set                               as Set
@@ -34,7 +34,7 @@ logMsg :: MonadIO m => String -> m ()
 logMsg = liftIO . putStrLn
 
 test :: IO ()
-test = runManaged $ do
+test = runResourceT $ do
   glfw
   glfwReqExts     <- requiredGLFWExtensions
   vkInstance      <- vulkanInstance
@@ -44,7 +44,7 @@ test = runManaged $ do
                        layers
   window          <- windowTitled winWidth winHeight "vulkan-test"
   surface         <- windowSurface vkInstance window
-  (pDevice, queues, surfaceCaps, surfaceFormats, presentModes)
+  (pDevice, queues)
                   <- pickPhysicalDevice vkInstance surface extensions
   graphicsFamily  <- findGraphicsQueueFamilyIndex queues
   presentFamily   <- findPresentQueueFamilyIndex
@@ -59,62 +59,79 @@ test = runManaged $ do
                        graphicsFamily
   graphicsQueue   <- liftIO $ getDeviceQueue device graphicsFamily 0
   presentQueue    <- liftIO $ getDeviceQueue device presentFamily 0
-  (swapChain, chainFormat, swapExtent)
-                  <- pickSwapchain
-                       device
-                       graphicsFamily
-                       presentFamily
-                       surface
-                       surfaceCaps
-                       surfaceFormats
-                       presentModes
-                       winWidth
-                       winHeight
-  views           <- imageViews
-                       device
-                       swapChain
-                       chainFormat
-  (pipeline, rpass)
-                  <- createGraphicsPipeline
-                       device
-                       chainFormat
-                       swapExtent
-  framebuffers    <- createFramebuffers
-                       device
-                       rpass
-                       swapExtent
-                       views
-  graphicsCommandPool
-                  <- commandPool
-                       device
-                       graphicsFamily
-  cmdBuffers      <- createCommandBuffers
-                       device
-                       graphicsCommandPool
-                       framebuffers
-                       rpass
-                       swapExtent
-                       pipeline
 
-  syncs           <- replicateM 3 $ do
-    imageAvailableSemaphore <- semaphore device
-    renderFinishedSemaphore <- semaphore device
-    inFlightFence           <- fence device VK_FENCE_CREATE_SIGNALED_BIT
-    return (imageAvailableSemaphore, renderFinishedSemaphore, inFlightFence)
+  liftIO $
+    loop pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue
 
-  mainloop
-    device
-    swapChain
-    graphicsQueue
-    presentQueue
-    cmdBuffers
-    syncs
-    window
   where
     extensions = [VK_KHR_SWAPCHAIN_EXTENSION_NAME]
     layers = ["VK_LAYER_LUNARG_standard_validation"]
     winWidth = 640
     winHeight = 360
+
+    loop pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue = do
+      outOfDate <- runResourceT $
+        go pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue
+      when outOfDate $
+        loop pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue
+
+
+    go pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue = do
+      (surfaceCaps, surfaceFormats, presentModes)
+                      <- querySwapChainSupport pDevice surface
+      (width, height) <- liftIO $ GLFW.getFramebufferSize window
+      logMsg $ "Framebuffer size is " ++ show width ++ "x" ++ show height
+      (swapChain, chainFormat, swapExtent)
+                      <- pickSwapchain
+                           device
+                           graphicsFamily
+                           presentFamily
+                           surface
+                           surfaceCaps
+                           surfaceFormats
+                           presentModes
+                           (fromIntegral width)
+                           (fromIntegral height)
+      views           <- imageViews
+                           device
+                           swapChain
+                           chainFormat
+      (pipeline, rpass)
+                      <- createGraphicsPipeline
+                           device
+                           chainFormat
+                           swapExtent
+      framebuffers    <- createFramebuffers
+                           device
+                           rpass
+                           swapExtent
+                           views
+      graphicsCommandPool
+                      <- commandPool
+                           device
+                           graphicsFamily
+      cmdBuffers      <- createCommandBuffers
+                           device
+                           graphicsCommandPool
+                           framebuffers
+                           rpass
+                           swapExtent
+                           pipeline
+
+      syncs           <- replicateM 3 $ do
+        imageAvailableSemaphore <- semaphore device
+        renderFinishedSemaphore <- semaphore device
+        inFlightFence           <- fence device VK_FENCE_CREATE_SIGNALED_BIT
+        return (imageAvailableSemaphore, renderFinishedSemaphore, inFlightFence)
+
+      mainloop
+        device
+        swapChain
+        graphicsQueue
+        presentQueue
+        cmdBuffers
+        syncs
+        window
 
 mainloop
   :: VkDevice
@@ -124,7 +141,7 @@ mainloop
   -> [VkCommandBuffer]
   -> [(VkSemaphore, VkSemaphore, VkFence)]
   -> GLFW.Window
-  -> Managed ()
+  -> ResIO Bool
 mainloop
   device
   swapChain
@@ -132,24 +149,30 @@ mainloop
   graphicsQueue
   presentQueue
   syncs
-  window = do
+  window =
     go (cycle syncs)
-    deviceWaitIdle device
   where
-    go [] = logMsg "No syncs!"
+    go [] = logMsg "No syncs!" >> return False
     go (sync : rest) = do
       liftIO GLFW.pollEvents
       shouldClose <- liftIO $ GLFW.windowShouldClose window
-      unless shouldClose $ do
-        drawFrame
-          device
-          swapChain
-          cmdBuffers
-          graphicsQueue
-          presentQueue
-          sync
-          window
-        go rest
+      if shouldClose
+      then
+        return False
+      else do
+        continue <-
+          drawFrame
+            device
+            swapChain
+            cmdBuffers
+            graphicsQueue
+            presentQueue
+            sync
+            window
+        if continue
+        then go rest
+        else return True
+          -- deviceWaitIdle device
 
 deviceWaitIdle :: MonadIO m => VkDevice -> m ()
 deviceWaitIdle device = liftIO $
@@ -164,7 +187,7 @@ drawFrame
   -> [VkCommandBuffer]
   -> (VkSemaphore, VkSemaphore, VkFence)
   -> GLFW.Window
-  -> Managed ()
+  -> ResIO Bool
 drawFrame
   device
   swapChain
@@ -175,15 +198,19 @@ drawFrame
   _window = do
     waitForFences device [inFlightFence] maxBound
     resetFences device [inFlightFence]
-    imageIndex <- acquireNextImage device swapChain maxBound imageAvailableSemaphore VK_NULL
-    submitQueue
-      graphicsQueue
-      [(imageAvailableSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)]
-      [renderFinishedSemaphore]
-      inFlightFence
-      [cmdBuffers !! fromIntegral imageIndex]
-    present presentQueue [swapChain] [renderFinishedSemaphore] [imageIndex]
-    deviceWaitIdle device
+    next <- acquireNextImage device swapChain maxBound imageAvailableSemaphore VK_NULL
+    case next of
+      Just imageIndex -> do
+        submitQueue
+          graphicsQueue
+          [(imageAvailableSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)]
+          [renderFinishedSemaphore]
+          inFlightFence
+          [cmdBuffers !! fromIntegral imageIndex]
+        present presentQueue [swapChain] [renderFinishedSemaphore] [imageIndex]
+      Nothing -> do
+        deviceWaitIdle device
+        return False
 
 waitForFences :: MonadIO m => VkDevice -> [VkFence] -> Word64 -> m ()
 waitForFences device fences timeout = liftIO $
@@ -202,11 +229,15 @@ present
  -> [VkSwapchainKHR]
  -> [VkSemaphore]
  -> [Word32]
- -> Managed ()
+ -> ResIO Bool
 present queue swapChains wait imageIndices = liftIO $
-  withPtr presentInfo $
-    vkQueuePresentKHR queue
-      >=> throwVkResult "vkQueuePresentKHR: Failed to submit present request."
+  withPtr presentInfo $ \ptr -> do
+    result <- vkQueuePresentKHR queue ptr
+    case result of
+      VK_SUCCESS -> return True
+      VK_SUBOPTIMAL_KHR -> return True
+      VK_ERROR_OUT_OF_DATE_KHR -> logMsg "vkQueuePresentKHR: Out of date." >> return False
+      err        -> throwVkResult "vkQueuePresentKHR: Failed to submit present request." err >> return False
   where
     presentInfo = createVk @VkPresentInfoKHR
       $  set           @"sType" VK_STRUCTURE_TYPE_PRESENT_INFO_KHR
@@ -224,7 +255,7 @@ submitQueue
  -> [VkSemaphore]
  -> VkFence
  -> [VkCommandBuffer]
- -> Managed ()
+ -> ResIO ()
 submitQueue queue waits signal fence_ buffers = liftIO $
   withArrayLen [submitInfo] $ \count siPtr ->
     vkQueueSubmit queue (fromIntegral count) siPtr fence_
@@ -248,24 +279,27 @@ acquireNextImage
   -> Word64
   -> VkSemaphore
   -> VkFence
-  -> Managed Word32
+  -> ResIO (Maybe Word32)
 acquireNextImage device swapChain timeout semaphore_ fence_ = liftIO $
-  allocaPeek
-    ( vkAcquireNextImageKHR
-        device
-        swapChain
-        timeout
-        semaphore_
-        fence_
-        >=> throwVkResult "vkAcquireNextImageKHR: Failed to acquire image."
-    )
+  alloca $ \ptr -> do
+    result <- vkAcquireNextImageKHR
+      device
+      swapChain
+      timeout
+      semaphore_
+      fence_
+      ptr
+    case result of
+      VK_SUCCESS -> Just <$> peek ptr
+      VK_SUBOPTIMAL_KHR -> Just <$> peek ptr
+      VK_ERROR_OUT_OF_DATE_KHR -> logMsg "vkAcquireNextImageKHR: Out of date." >> return Nothing
+      err -> throwVkResult "vkAcquireNextImageKHR: Failed to acquire image." err >> return Nothing
 
-glfw :: Managed ()
+glfw :: ResIO ()
 glfw =
-  managed_ $
-    bracket_
-      initializeGLFW
-      terminateGLFW
+  managed
+    initializeGLFW
+    (const terminateGLFW)
 
 initializeGLFW :: IO ()
 initializeGLFW = do
@@ -287,22 +321,26 @@ requiredGLFWExtensions = liftIO $ do
   logMsg $ "GLFW requires extensions: " ++ unwords extNames
   return extensions
 
+managed :: MonadResource m => IO a -> (a -> IO ()) -> m a
+managed alloc free_ = do
+  (_releaseKey, a) <- allocate alloc free_
+  return a
+
 vulkanInstance
   :: String
   -> String
   -> [CString]
   -> [String]
-  -> Managed VkInstance
+  -> ResIO VkInstance
 vulkanInstance progName engineName extensions layers =
-  managed $
-    bracket
-      ( createVulkanInstance
-          progName
-          engineName
-          extensions
-          layers
-      )
-      destroyVulkanInstance
+  managed
+    ( createVulkanInstance
+        progName
+        engineName
+        extensions
+        layers
+    )
+    destroyVulkanInstance
 
 allocaPeek
   :: Storable a
@@ -389,7 +427,7 @@ pickPhysicalDevice
   => VkInstance
   -> VkSurfaceKHR
   -> [CString]
-  -> m (VkPhysicalDevice, [VkQueueFamilyProperties], VkSurfaceCapabilitiesKHR, [VkSurfaceFormatKHR], [VkPresentModeKHR])
+  -> m (VkPhysicalDevice, [VkQueueFamilyProperties])
 pickPhysicalDevice vkInstance surface requiredExtensions = liftIO $ do
   logMsg "Enumerating Vulkan devices"
   allDevices <-
@@ -406,11 +444,9 @@ pickPhysicalDevice vkInstance surface requiredExtensions = liftIO $ do
     queues <- physicalDeviceQueueFamiliesProps device
     extensions <- enumerateDeviceExtensionProperties device
     logDeviceExtensionProperties extensions
-    surfaceCaps <- getPhysicalDeviceSurfaceCapabilities device surface
+    (surfaceCaps, surfaceFormats, presentModes) <- querySwapChainSupport device surface
     logSurfaceCapabilities surfaceCaps
-    surfaceFormats <- getPhysicalDeviceSurfaceFormats device surface
     logSurfaceFormats surfaceFormats
-    presentModes <- getPhysicalDeviceSurfacePresentModes device surface
     logPresentModes presentModes
     logMsg "-------------------"
     return
@@ -432,11 +468,22 @@ pickPhysicalDevice vkInstance surface requiredExtensions = liftIO $ do
   logMsg $ "Number of GPU devices found: " ++ show (length gpus)
 
   case headMay gpus of
-    Just (devIndex, dev, _, _, queues, _, surfaceCaps, surfaceFormats, presentModes) -> do
+    Just (devIndex, dev, _, _, queues, _, _, _, _) -> do
       logMsg ("Picked device #" ++ show devIndex)
-      return (dev, queues, surfaceCaps, surfaceFormats, presentModes)
+      return (dev, queues)
     Nothing ->
       throwVkMsg "No suitable GPU devices!"
+
+querySwapChainSupport
+  :: MonadIO m
+  => VkPhysicalDevice
+  -> VkSurfaceKHR
+  -> m (VkSurfaceCapabilitiesKHR, [VkSurfaceFormatKHR], [VkPresentModeKHR])
+querySwapChainSupport device surface = liftIO $ do
+  surfaceCaps <- getPhysicalDeviceSurfaceCapabilities device surface
+  surfaceFormats <- getPhysicalDeviceSurfaceFormats device surface
+  presentModes <- getPhysicalDeviceSurfacePresentModes device surface
+  return (surfaceCaps, surfaceFormats, presentModes)
 
 isDeviceSuitable
   :: [CString]
@@ -650,17 +697,16 @@ logicalDevice
   -> [CString]
   -> [String]
   -> Word32
-  -> Managed VkDevice
+  -> ResIO VkDevice
 logicalDevice physicalDevice extensions layers queueFamilyIndex =
-  managed $
-    bracket
-      ( createLogicalDevice
-          physicalDevice
-          extensions
-          layers
-          queueFamilyIndex
-      )
-      destroyDevice
+  managed
+    ( createLogicalDevice
+        physicalDevice
+        extensions
+        layers
+        queueFamilyIndex
+    )
+    destroyDevice
 
 createLogicalDevice
   :: VkPhysicalDevice
@@ -704,17 +750,16 @@ destroyDevice device =
 windowSurface
   :: VkInstance
   -> GLFW.Window
-  -> Managed VkSurfaceKHR
+  -> ResIO VkSurfaceKHR
 windowSurface vkInstance window =
-  managed $
-    bracket
-      ( createSurface
-          vkInstance
-          window
-      )
-      ( destroySurface
-          vkInstance
-      )
+  managed
+    ( createSurface
+        vkInstance
+        window
+    )
+    ( destroySurface
+        vkInstance
+    )
 
 createSurface :: VkInstance -> GLFW.Window -> IO VkSurfaceKHR
 createSurface vkInstance window =
@@ -733,10 +778,11 @@ destroySurface vkInstance surface = do
   vkDestroySurfaceKHR vkInstance surface VK_NULL
   logMsg "Destroyed surface"
 
-windowTitled :: Word32 -> Word32 -> String -> Managed GLFW.Window
+windowTitled :: Word32 -> Word32 -> String -> ResIO GLFW.Window
 windowTitled width height title =
-  managed $
-    bracket (createWindow width height title) destroyWindow
+  managed
+    (createWindow width height title)
+    destroyWindow
 
 createWindow :: Word32 -> Word32 -> String -> IO GLFW.Window
 createWindow width height title = do
@@ -773,7 +819,7 @@ pickSwapchain
   -> [VkPresentModeKHR]
   -> Word32
   -> Word32
-  -> Managed (VkSwapchainKHR, VkFormat, VkExtent2D)
+  -> ResIO (VkSwapchainKHR, VkFormat, VkExtent2D)
 pickSwapchain
     device
     graphicsFamily
@@ -904,7 +950,7 @@ swapchain
   -> Word32
   -> VkExtent2D
   -> VkSurfaceTransformFlagBitsKHR
-  -> Managed VkSwapchainKHR
+  -> ResIO VkSwapchainKHR
 swapchain
     device
     graphicsFamily
@@ -916,21 +962,20 @@ swapchain
     imageCount
     swapExtent
     transform =
-  managed $
-    bracket
-      ( createSwapchain
-          device
-          graphicsFamily
-          presentFamily
-          surface
-          surfaceFormat
-          colorSpace
-          presentMode
-          imageCount
-          swapExtent
-          transform
-       )
-       ( destroySwapchain device )
+  managed
+    ( createSwapchain
+        device
+        graphicsFamily
+        presentFamily
+        surface
+        surfaceFormat
+        colorSpace
+        presentMode
+        imageCount
+        swapExtent
+        transform
+     )
+     ( destroySwapchain device )
 
 createSwapchain
   :: VkDevice
@@ -995,7 +1040,7 @@ destroySwapchain device chain =
   vkDestroySwapchainKHR device chain VK_NULL
     <* logMsg "Destroyed swapchain"
 
-imageViews :: VkDevice -> VkSwapchainKHR -> VkFormat -> Managed [VkImageView]
+imageViews :: VkDevice -> VkSwapchainKHR -> VkFormat -> ResIO [VkImageView]
 imageViews device chain chainFormat = do
   swapImages  <- getSwapchainImages
                    device
@@ -1016,16 +1061,15 @@ imageView
   :: VkDevice
   -> VkFormat
   -> VkImage
-  -> Managed VkImageView
+  -> ResIO VkImageView
 imageView device imageFormat image =
-  managed $
-    bracket
-      ( createImageView
-          device
-          image
-          imageFormat
-       )
-       ( destroyImageView device )
+  managed
+    ( createImageView
+        device
+        image
+        imageFormat
+     )
+     ( destroyImageView device )
 
 createImageView
   :: VkDevice
@@ -1073,12 +1117,11 @@ destroyImageView device view =
 loadShader
   :: VkDevice
   -> FilePath
-  -> Managed VkShaderModule
+  -> ResIO VkShaderModule
 loadShader device srcFile =
-  managed $
-    bracket
-      ( createShaderModule device srcFile )
-      ( destroyShaderModule device)
+  managed
+    ( createShaderModule device srcFile )
+    ( destroyShaderModule device)
 
 createShaderModule
   :: VkDevice
@@ -1114,7 +1157,7 @@ createGraphicsPipeline
   :: VkDevice
   -> VkFormat
   -> VkExtent2D
-  -> Managed (VkPipeline, VkRenderPass)
+  -> ResIO (VkPipeline, VkRenderPass)
 createGraphicsPipeline device format swapExtent = do
   vertexShader   <- loadShader device "shaders/vert.spv"
   fragmentShader <- loadShader device "shaders/frag.spv"
@@ -1281,12 +1324,11 @@ extent2D width height =
     $  set @"width" width
     &* set @"height" height
 
-graphicsPipeline :: VkDevice -> VkGraphicsPipelineCreateInfo -> Managed VkPipeline
+graphicsPipeline :: VkDevice -> VkGraphicsPipelineCreateInfo -> ResIO VkPipeline
 graphicsPipeline device pipelineInfo =
-  managed $
-    bracket
-      ( createGraphicsPipelines device [pipelineInfo] )
-      ( destroyPipeline device )
+  managed
+    ( createGraphicsPipelines device [pipelineInfo] )
+    ( destroyPipeline device )
 
 createGraphicsPipelines :: VkDevice -> [VkGraphicsPipelineCreateInfo] -> IO VkPipeline
 createGraphicsPipelines device pipelines =
@@ -1302,12 +1344,11 @@ destroyPipeline device pipeline =
   vkDestroyPipeline device pipeline VK_NULL
     <* logMsg "Destroyed graphics pipeline"
 
-pipelineLayout :: VkDevice -> Managed VkPipelineLayout
+pipelineLayout :: VkDevice -> ResIO VkPipelineLayout
 pipelineLayout device =
-  managed $
-    bracket
-      ( createPipelineLayout device )
-      ( destroyPipelineLayout device)
+  managed
+    ( createPipelineLayout device )
+    ( destroyPipelineLayout device )
 
 createPipelineLayout :: VkDevice -> IO VkPipelineLayout
 createPipelineLayout device =
@@ -1333,12 +1374,11 @@ destroyPipelineLayout device layout =
   vkDestroyPipelineLayout device layout VK_NULL
     <* logMsg "Destroyed pipeline layout"
 
-renderPass :: VkDevice -> VkFormat -> Managed VkRenderPass
+renderPass :: VkDevice -> VkFormat -> ResIO VkRenderPass
 renderPass device format =
-  managed $
-    bracket
-      ( createRenderPass device format )
-      ( destroyRenderPass device )
+  managed
+    ( createRenderPass device format )
+    ( destroyRenderPass device )
 
 createRenderPass :: VkDevice -> VkFormat -> IO VkRenderPass
 createRenderPass device format =
@@ -1409,17 +1449,16 @@ framebuffer
   -> VkRenderPass
   -> VkExtent2D
   -> [VkImageView]
-  -> Managed VkFramebuffer
+  -> ResIO VkFramebuffer
 framebuffer device rpass extent_ attachments =
-  managed $
-    bracket
-      ( createFramebuffer
-          device
-          rpass
-          extent_
-          attachments
-      )
-      ( destroyFramebuffer device )
+  managed
+    ( createFramebuffer
+        device
+        rpass
+        extent_
+        attachments
+    )
+    ( destroyFramebuffer device )
 
 createFramebuffer
   :: VkDevice
@@ -1456,16 +1495,15 @@ createFramebuffers
   -> VkRenderPass
   -> VkExtent2D
   -> [VkImageView]
-  -> Managed [VkFramebuffer]
+  -> ResIO [VkFramebuffer]
 createFramebuffers device rpass extent_ =
   mapM (\attachment -> framebuffer device rpass extent_ [attachment])
 
-commandPool :: VkDevice -> Word32 -> Managed VkCommandPool
+commandPool :: VkDevice -> Word32 -> ResIO VkCommandPool
 commandPool device familyIndex =
-  managed $
-    bracket
-      ( createCommandPool device familyIndex )
-      ( destroyCommandPool device )
+  managed
+    ( createCommandPool device familyIndex )
+    ( destroyCommandPool device )
 
 createCommandPool :: VkDevice -> Word32 -> IO VkCommandPool
 createCommandPool device familyIndex =
@@ -1494,7 +1532,7 @@ createCommandBuffers
   -> VkRenderPass
   -> VkExtent2D
   -> VkPipeline
-  -> Managed [VkCommandBuffer]
+  -> ResIO [VkCommandBuffer]
 createCommandBuffers device pool frameBuffers rpass extent_ pipeline = do
   cmdBuffers <- commandBuffers device pool (length frameBuffers)
 
@@ -1555,12 +1593,11 @@ commandBuffers
   :: VkDevice
   -> VkCommandPool
   -> Int
-  -> Managed [VkCommandBuffer]
+  -> ResIO [VkCommandBuffer]
 commandBuffers device pool bufferCount =
-  managed $
-    bracket
-      ( allocateCommandBuffers device pool bufferCount )
-      ( freeCommandBuffers device pool )
+  managed
+    ( allocateCommandBuffers device pool bufferCount )
+    ( freeCommandBuffers device pool )
 
 allocateCommandBuffers
   :: MonadIO m
@@ -1594,12 +1631,11 @@ freeCommandBuffers device pool buffers = liftIO $
     vkFreeCommandBuffers device pool (fromIntegral count) pBuffers
       <* logMsg "Freed command buffers"
 
-semaphore :: VkDevice -> Managed VkSemaphore
+semaphore :: VkDevice -> ResIO VkSemaphore
 semaphore device =
-  managed $
-    bracket
-      ( createSemaphore device )
-      ( destroySemaphore device )
+  managed
+    ( createSemaphore device )
+    ( destroySemaphore device )
 
 createSemaphore :: VkDevice -> IO VkSemaphore
 createSemaphore device =
@@ -1620,12 +1656,11 @@ destroySemaphore device sem =
   vkDestroySemaphore device sem VK_NULL
     <* logMsg "Destroyed semaphore"
 
-fence :: VkDevice -> VkFenceCreateFlags -> Managed VkFence
+fence :: VkDevice -> VkFenceCreateFlags -> ResIO VkFence
 fence device flags =
-  managed $
-    bracket
-      ( createFence device flags )
-      ( waitDestroyFence device )
+  managed
+    ( createFence device flags )
+    ( waitDestroyFence device )
 
 createFence :: VkDevice -> VkFenceCreateFlags -> IO VkFence
 createFence device flags =
