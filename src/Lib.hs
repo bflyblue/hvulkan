@@ -10,6 +10,7 @@ module Lib
     ( test
     ) where
 
+import           Control.Concurrent.MVar
 import           Control.Exception
 import           Control.Monad
 import           Control.Monad.IO.Class
@@ -43,6 +44,8 @@ test = runResourceT $ do
                        glfwReqExts
                        layers
   window          <- windowTitled winWidth winHeight "vulkan-test"
+  wasResized      <- liftIO $ newMVar False
+  liftIO $ GLFW.setWindowSizeCallback window (Just $ windowResized wasResized)
   surface         <- windowSurface vkInstance window
   (pDevice, queues)
                   <- pickPhysicalDevice vkInstance surface extensions
@@ -61,7 +64,7 @@ test = runResourceT $ do
   presentQueue    <- liftIO $ getDeviceQueue device presentFamily 0
 
   liftIO $
-    loop pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue
+    loop pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue wasResized
 
   where
     extensions = [VK_KHR_SWAPCHAIN_EXTENSION_NAME]
@@ -69,14 +72,21 @@ test = runResourceT $ do
     winWidth = 640
     winHeight = 360
 
-    loop pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue = do
+    windowResized :: MVar Bool -> GLFW.WindowSizeCallback
+    windowResized flag _window _width _height = do
+      _ <- takeMVar flag
+      putMVar flag True
+
+    loop pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue wasResized = do
       outOfDate <- runResourceT $
-        go pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue
+        go pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue wasResized
       when outOfDate $
-        loop pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue
+        loop pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue wasResized
 
-
-    go pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue = do
+    go pDevice device window surface presentFamily graphicsFamily presentQueue graphicsQueue wasResized = do
+      liftIO $ do
+        _ <- takeMVar wasResized
+        putMVar wasResized False
       (surfaceCaps, surfaceFormats, presentModes)
                       <- querySwapChainSupport pDevice surface
       (width, height) <- liftIO $ GLFW.getFramebufferSize window
@@ -132,6 +142,7 @@ test = runResourceT $ do
         cmdBuffers
         syncs
         window
+        wasResized
 
 mainloop
   :: VkDevice
@@ -141,6 +152,7 @@ mainloop
   -> [VkCommandBuffer]
   -> [(VkSemaphore, VkSemaphore, VkFence)]
   -> GLFW.Window
+  -> MVar Bool
   -> ResIO Bool
 mainloop
   device
@@ -149,7 +161,8 @@ mainloop
   graphicsQueue
   presentQueue
   syncs
-  window =
+  window
+  wasResized =
     go (cycle syncs)
   where
     go [] = logMsg "No syncs!" >> return False
@@ -168,11 +181,10 @@ mainloop
             graphicsQueue
             presentQueue
             sync
-            window
+            wasResized
         if continue
         then go rest
         else return True
-          -- deviceWaitIdle device
 
 deviceWaitIdle :: MonadIO m => VkDevice -> m ()
 deviceWaitIdle device = liftIO $
@@ -186,7 +198,7 @@ drawFrame
   -> VkQueue
   -> [VkCommandBuffer]
   -> (VkSemaphore, VkSemaphore, VkFence)
-  -> GLFW.Window
+  -> MVar Bool
   -> ResIO Bool
 drawFrame
   device
@@ -195,12 +207,19 @@ drawFrame
   presentQueue
   cmdBuffers
   (imageAvailableSemaphore, renderFinishedSemaphore, inFlightFence)
-  _window = do
+  wasResized = do
     waitForFences device [inFlightFence] maxBound
-    resetFences device [inFlightFence]
-    next <- acquireNextImage device swapChain maxBound imageAvailableSemaphore VK_NULL
+    resized <- liftIO $ readMVar wasResized
+    next <-
+      if resized
+      then do
+        logMsg "GLFW reported resize"
+        return Nothing
+      else
+        acquireNextImage device swapChain maxBound imageAvailableSemaphore VK_NULL
     case next of
       Just imageIndex -> do
+        resetFences device [inFlightFence]
         submitQueue
           graphicsQueue
           [(imageAvailableSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)]
@@ -235,7 +254,7 @@ present queue swapChains wait imageIndices = liftIO $
     result <- vkQueuePresentKHR queue ptr
     case result of
       VK_SUCCESS -> return True
-      VK_SUBOPTIMAL_KHR -> return True
+      VK_SUBOPTIMAL_KHR -> logMsg "vkQueuePresentKHR: Suboptimal." >> return False
       VK_ERROR_OUT_OF_DATE_KHR -> logMsg "vkQueuePresentKHR: Out of date." >> return False
       err        -> throwVkResult "vkQueuePresentKHR: Failed to submit present request." err >> return False
   where
@@ -291,7 +310,7 @@ acquireNextImage device swapChain timeout semaphore_ fence_ = liftIO $
       ptr
     case result of
       VK_SUCCESS -> Just <$> peek ptr
-      VK_SUBOPTIMAL_KHR -> Just <$> peek ptr
+      VK_SUBOPTIMAL_KHR -> logMsg "vkAcquireNextImageKHR: Out of date." >> return Nothing
       VK_ERROR_OUT_OF_DATE_KHR -> logMsg "vkAcquireNextImageKHR: Out of date." >> return Nothing
       err -> throwVkResult "vkAcquireNextImageKHR: Failed to acquire image." err >> return Nothing
 
