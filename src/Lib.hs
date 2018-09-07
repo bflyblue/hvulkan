@@ -88,7 +88,7 @@ test = runManaged $ do
                   <- commandPool
                        device
                        graphicsFamily
-  commandBuffers  <- createCommandBuffers
+  cmdBuffers      <- createCommandBuffers
                        device
                        graphicsCommandPool
                        framebuffers
@@ -107,7 +107,7 @@ test = runManaged $ do
     swapChain
     graphicsQueue
     presentQueue
-    commandBuffers
+    cmdBuffers
     syncs
     window
   where
@@ -128,7 +128,7 @@ mainloop
 mainloop
   device
   swapChain
-  commandBuffers
+  cmdBuffers
   graphicsQueue
   presentQueue
   syncs
@@ -144,7 +144,7 @@ mainloop
         drawFrame
           device
           swapChain
-          commandBuffers
+          cmdBuffers
           graphicsQueue
           presentQueue
           sync
@@ -170,7 +170,7 @@ drawFrame
   swapChain
   graphicsQueue
   presentQueue
-  commandBuffers
+  cmdBuffers
   (imageAvailableSemaphore, renderFinishedSemaphore, inFlightFence)
   _window = do
     waitForFences device [inFlightFence] maxBound
@@ -181,7 +181,7 @@ drawFrame
       [(imageAvailableSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)]
       [renderFinishedSemaphore]
       inFlightFence
-      [commandBuffers !! fromIntegral imageIndex]
+      [cmdBuffers !! fromIntegral imageIndex]
     present presentQueue [swapChain] [renderFinishedSemaphore] [imageIndex]
     deviceWaitIdle device
 
@@ -1488,26 +1488,26 @@ destroyCommandPool device pool =
     <* logMsg "Destroyed command pool"
 
 createCommandBuffers
-  :: MonadIO m
-  => VkDevice
+  :: VkDevice
   -> VkCommandPool
   -> [VkFramebuffer]
   -> VkRenderPass
   -> VkExtent2D
   -> VkPipeline
-  -> m [VkCommandBuffer]
-createCommandBuffers device pool frameBuffers rpass extent_ pipeline = liftIO $ do
-  commandBuffers <- allocateCommandBuffers device pool (length frameBuffers)
+  -> Managed [VkCommandBuffer]
+createCommandBuffers device pool frameBuffers rpass extent_ pipeline = do
+  cmdBuffers <- commandBuffers device pool (length frameBuffers)
 
-  forM_ (zip frameBuffers commandBuffers) $ \(frameBuffer_, cmd) -> do
-    beginCommandBuffer cmd VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
-    beginRenderPass cmd frameBuffer_
-    vkCmdBindPipeline cmd VK_PIPELINE_BIND_POINT_GRAPHICS pipeline
-    vkCmdDraw cmd 3 1 0 0
-    vkCmdEndRenderPass cmd
-    endCommandBuffer cmd
+  liftIO $
+    forM_ (zip frameBuffers cmdBuffers) $ \(frameBuffer_, cmd) -> do
+      beginCommandBuffer cmd VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
+      beginRenderPass cmd frameBuffer_
+      vkCmdBindPipeline cmd VK_PIPELINE_BIND_POINT_GRAPHICS pipeline
+      vkCmdDraw cmd 3 1 0 0
+      vkCmdEndRenderPass cmd
+      endCommandBuffer cmd
 
-  return commandBuffers
+  return cmdBuffers
 
   where
     beginCommandBuffer buffer flags =
@@ -1551,6 +1551,17 @@ createCommandBuffers device pool frameBuffers rpass extent_ pipeline = liftIO $ 
         withPtr renderPassInfo $ \rpiPtr ->
           vkCmdBeginRenderPass buffer rpiPtr VK_SUBPASS_CONTENTS_INLINE
 
+commandBuffers
+  :: VkDevice
+  -> VkCommandPool
+  -> Int
+  -> Managed [VkCommandBuffer]
+commandBuffers device pool bufferCount =
+  managed $
+    bracket
+      ( allocateCommandBuffers device pool bufferCount )
+      ( freeCommandBuffers device pool )
+
 allocateCommandBuffers
   :: MonadIO m
   => VkDevice
@@ -1571,6 +1582,17 @@ allocateCommandBuffers device pool bufferCount = liftIO $
       &* set           @"commandPool" pool
       &* set           @"level" VK_COMMAND_BUFFER_LEVEL_PRIMARY
       &* set           @"commandBufferCount" (fromIntegral bufferCount)
+
+freeCommandBuffers
+  :: MonadIO m
+  => VkDevice
+  -> VkCommandPool
+  -> [VkCommandBuffer]
+  -> m ()
+freeCommandBuffers device pool buffers = liftIO $
+  withArrayLen buffers $ \count pBuffers ->
+    vkFreeCommandBuffers device pool (fromIntegral count) pBuffers
+      <* logMsg "Freed command buffers"
 
 semaphore :: VkDevice -> Managed VkSemaphore
 semaphore device =
