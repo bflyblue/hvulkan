@@ -95,8 +95,12 @@ test = runManaged $ do
                        rpass
                        swapExtent
                        pipeline
-  imageAvailableSemaphore <- semaphore device
-  renderFinishedSemaphore <- semaphore device
+
+  syncs           <- replicateM 3 $ do
+    imageAvailableSemaphore <- semaphore device
+    renderFinishedSemaphore <- semaphore device
+    inFlightFence           <- fence device VK_FENCE_CREATE_SIGNALED_BIT
+    return (imageAvailableSemaphore, renderFinishedSemaphore, inFlightFence)
 
   mainloop
     device
@@ -104,8 +108,7 @@ test = runManaged $ do
     graphicsQueue
     presentQueue
     commandBuffers
-    imageAvailableSemaphore
-    renderFinishedSemaphore
+    syncs
     window
   where
     extensions = [VK_KHR_SWAPCHAIN_EXTENSION_NAME]
@@ -119,8 +122,7 @@ mainloop
   -> VkQueue
   -> VkQueue
   -> [VkCommandBuffer]
-  -> VkSemaphore
-  -> VkSemaphore
+  -> [(VkSemaphore, VkSemaphore, VkFence)]
   -> GLFW.Window
   -> Managed ()
 mainloop
@@ -129,13 +131,13 @@ mainloop
   commandBuffers
   graphicsQueue
   presentQueue
-  imageAvailableSemaphore
-  renderFinishedSemaphore
+  syncs
   window = do
-    go
+    go (cycle syncs)
     deviceWaitIdle device
   where
-    go = do
+    go [] = logMsg "No syncs!"
+    go (sync : rest) = do
       liftIO GLFW.pollEvents
       shouldClose <- liftIO $ GLFW.windowShouldClose window
       unless shouldClose $ do
@@ -145,10 +147,9 @@ mainloop
           commandBuffers
           graphicsQueue
           presentQueue
-          imageAvailableSemaphore
-          renderFinishedSemaphore
+          sync
           window
-        go
+        go rest
 
 deviceWaitIdle :: MonadIO m => VkDevice -> m ()
 deviceWaitIdle device = liftIO $
@@ -161,8 +162,7 @@ drawFrame
   -> VkQueue
   -> VkQueue
   -> [VkCommandBuffer]
-  -> VkSemaphore
-  -> VkSemaphore
+  -> (VkSemaphore, VkSemaphore, VkFence)
   -> GLFW.Window
   -> Managed ()
 drawFrame
@@ -171,17 +171,31 @@ drawFrame
   graphicsQueue
   presentQueue
   commandBuffers
-  imageAvailableSemaphore
-  renderFinishedSemaphore
+  (imageAvailableSemaphore, renderFinishedSemaphore, inFlightFence)
   _window = do
+    waitForFences device [inFlightFence] maxBound
+    resetFences device [inFlightFence]
     imageIndex <- acquireNextImage device swapChain maxBound imageAvailableSemaphore VK_NULL
     submitQueue
       graphicsQueue
       [(imageAvailableSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)]
       [renderFinishedSemaphore]
+      inFlightFence
       [commandBuffers !! fromIntegral imageIndex]
     present presentQueue [swapChain] [renderFinishedSemaphore] [imageIndex]
     deviceWaitIdle device
+
+waitForFences :: MonadIO m => VkDevice -> [VkFence] -> Word64 -> m ()
+waitForFences device fences timeout = liftIO $
+  withArrayLen fences $ \count pFences ->
+    vkWaitForFences device (fromIntegral count) pFences VK_TRUE timeout
+      >>= throwVkResult "vkWaitForFences: Failed to wait for fences."
+
+resetFences :: MonadIO m => VkDevice -> [VkFence] -> m ()
+resetFences device fences = liftIO $
+  withArrayLen fences $ \count pFences ->
+    vkResetFences device (fromIntegral count) pFences
+      >>= throwVkResult "vkResetFences: Failed to reset fences."
 
 present
  :: VkQueue
@@ -208,11 +222,12 @@ submitQueue
  :: VkQueue
  -> [(VkSemaphore, VkPipelineStageFlags)]
  -> [VkSemaphore]
+ -> VkFence
  -> [VkCommandBuffer]
  -> Managed ()
-submitQueue queue waits signal buffers = liftIO $
-  withPtr submitInfo $ \siPtr ->
-    vkQueueSubmit queue 1 siPtr VK_NULL_HANDLE
+submitQueue queue waits signal fence_ buffers = liftIO $
+  withArrayLen [submitInfo] $ \count siPtr ->
+    vkQueueSubmit queue (fromIntegral count) siPtr fence_
       >>= throwVkResult "vkQueueSubmit: Failed to submit queue."
   where
     (wait, waitStages) = unzip waits
@@ -313,7 +328,7 @@ createVulkanInstance
   -> [String]
   -> IO VkInstance
 createVulkanInstance progName engineName extensions layers =
-  withPtr iCreateInfo $ \iciPtr ->
+  withPtr createInfo $ \iciPtr ->
     allocaPeek
     ( vkCreateInstance iciPtr VK_NULL
         >=> throwVkResult "vkCreateInstance: Failed to create vkInstance."
@@ -329,7 +344,7 @@ createVulkanInstance progName engineName extensions layers =
       &* set       @"engineVersion" (_VK_MAKE_VERSION 1 0 0)
       &* set       @"apiVersion" (_VK_MAKE_VERSION 1 0 0)
 
-    iCreateInfo = createVk @VkInstanceCreateInfo
+    createInfo = createVk @VkInstanceCreateInfo
       $  set           @"sType" VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
       &* set           @"pNext" VK_NULL
       &* setVkRef      @"pApplicationInfo" appInfo
@@ -661,7 +676,7 @@ createLogicalDevice physicalDevice extensions layers queueFamilyIndex =
     )
     <* logMsg "Created logical device"
   where
-    qCreateInfo = createVk @VkDeviceQueueCreateInfo
+    queueInfo = createVk @VkDeviceQueueCreateInfo
       $  set        @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO
       &* set        @"pNext" VK_NULL
       &* set        @"flags" 0
@@ -673,7 +688,7 @@ createLogicalDevice physicalDevice extensions layers queueFamilyIndex =
       $  set           @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO
       &* set           @"pNext" VK_NULL
       &* set           @"flags" 0
-      &* setListRef    @"pQueueCreateInfos" [ qCreateInfo ]
+      &* setListRef    @"pQueueCreateInfos" [ queueInfo ]
       &* set           @"queueCreateInfoCount" 1
       &* set           @"enabledLayerCount" (fromIntegral $ length layers)
       &* setStrListRef @"ppEnabledLayerNames" layers
@@ -1270,14 +1285,14 @@ graphicsPipeline :: VkDevice -> VkGraphicsPipelineCreateInfo -> Managed VkPipeli
 graphicsPipeline device pipelineInfo =
   managed $
     bracket
-      ( createGraphicsPipelines device pipelineInfo )
+      ( createGraphicsPipelines device [pipelineInfo] )
       ( destroyPipeline device )
 
-createGraphicsPipelines :: VkDevice -> VkGraphicsPipelineCreateInfo -> IO VkPipeline
-createGraphicsPipelines device pipelineInfo =
-  withPtr pipelineInfo $ \ciPtr ->
+createGraphicsPipelines :: VkDevice -> [VkGraphicsPipelineCreateInfo] -> IO VkPipeline
+createGraphicsPipelines device pipelines =
+  withArrayLen pipelines $ \count ciPtr ->
     allocaPeek
-    ( vkCreateGraphicsPipelines device VK_NULL 1 ciPtr VK_NULL
+    ( vkCreateGraphicsPipelines device VK_NULL (fromIntegral count) ciPtr VK_NULL
         >=> throwVkResult "vkCreateGraphicsPipelines: Failed to create graphics pipelines."
     )
     <* logMsg "Created graphics pipeline"
@@ -1582,6 +1597,37 @@ destroySemaphore :: VkDevice -> VkSemaphore -> IO ()
 destroySemaphore device sem =
   vkDestroySemaphore device sem VK_NULL
     <* logMsg "Destroyed semaphore"
+
+fence :: VkDevice -> VkFenceCreateFlags -> Managed VkFence
+fence device flags =
+  managed $
+    bracket
+      ( createFence device flags )
+      ( waitDestroyFence device )
+
+createFence :: VkDevice -> VkFenceCreateFlags -> IO VkFence
+createFence device flags =
+  withPtr createInfo $ \ciPtr ->
+    allocaPeek
+    ( vkCreateFence device ciPtr VK_NULL
+        >=> throwVkResult "vkCreateSemaphore: Failed to create fence."
+    )
+    <* logMsg "Created fence"
+  where
+    createInfo = createVk @VkFenceCreateInfo
+      $  set           @"sType" VK_STRUCTURE_TYPE_FENCE_CREATE_INFO
+      &* set           @"pNext" VK_NULL
+      &* set           @"flags" flags
+
+waitDestroyFence :: VkDevice -> VkFence -> IO ()
+waitDestroyFence device fence_ = do
+  waitForFences device [fence_] maxBound
+  destroyFence device fence_
+
+destroyFence :: VkDevice -> VkFence -> IO ()
+destroyFence device fence_ =
+  vkDestroyFence device fence_ VK_NULL
+    <* logMsg "Destroyed fence"
 
 throwGLFW :: MonadIO m => String -> Bool -> m ()
 throwGLFW msg bool = liftIO $
