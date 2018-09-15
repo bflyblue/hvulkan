@@ -1,6 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds           #-}
-{-# LANGUAGE DeriveFunctor       #-}
 {-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE NegativeLiterals    #-}
 {-# LANGUAGE RecordWildCards     #-}
@@ -62,6 +61,12 @@ defaultConfig = Config
   , winHeight = 360
   }
 
+data SyncSet = SyncSet
+  { imageAvailableSemaphore   :: VkSemaphore
+  , renderFinishedSemaphore   :: VkSemaphore
+  , inFlightFence             :: VkFence
+  }
+
 data Context = Context
   { vkInstance                :: VkInstance
   , physicalDevice            :: VkPhysicalDevice
@@ -81,18 +86,11 @@ data Context = Context
   , views                     :: [VkImageView]
   , pipeline                  :: VkPipeline
   , renderpass                :: VkRenderPass
-  , syncs                     :: [(VkSemaphore, VkSemaphore, VkFence)]
+  , syncs                     :: [SyncSet]
   , framebuffers              :: [VkFramebuffer]
   , graphicsCommandPool       :: VkCommandPool
   , cmdBuffers                :: [VkCommandBuffer]
   }
-
-data Status a
-  = Done a
-  | Resized
-  | Suboptimal
-  | OutOfDate
-  deriving (Eq, Show, Functor)
 
 withContext :: Config -> (Context -> IO Bool) -> IO ()
 withContext Config{..} action = runResourceT $ do
@@ -163,23 +161,20 @@ withContext Config{..} action = runResourceT $ do
                                  renderpass
                                  swapExtent
                                  pipeline
-
-        syncs               <- replicateM 3 $ do
-          imageAvailableSemaphore <- semaphore device
-          renderFinishedSemaphore <- semaphore device
-          inFlightFence           <- fence device VK_FENCE_CREATE_SIGNALED_BIT
-          return (imageAvailableSemaphore, renderFinishedSemaphore, inFlightFence)
+        syncs               <- replicateM 3 (syncSet device)
 
         liftIO $ action Context{..}
 
-      -- Swap chain resources will be freed after runResourceT here
-
-      -- VK_SUBOPTIMAL_KHR -> logMsg "vkQueuePresentKHR: Suboptimal." >> return Suboptimal
-      -- VK_ERROR_OUT_OF_DATE_KHR -> logMsg "vkQueuePresentKHR: Out of date." >> return OutOfDate
-        -- deviceWaitIdle device
       unless done swapchainLoop
 
   liftIO swapchainLoop
+
+  where
+    syncSet device  = do
+      imageAvailableSemaphore <- semaphore device
+      renderFinishedSemaphore <- semaphore device
+      inFlightFence           <- fence device VK_FENCE_CREATE_SIGNALED_BIT
+      return SyncSet{..}
 
 test :: IO ()
 test = withContext defaultConfig mainloop
@@ -193,24 +188,30 @@ mainloop ctx@Context{..} = go (cycle syncs)
       shouldClose <- liftIO $ GLFW.windowShouldClose window
       if shouldClose
       then
-        return True
+        done
       else
-        catchJust
-          (\(VulkanException code _) ->
-              case code of
-                Just VK_SUBOPTIMAL_KHR -> Just code
-                Just VK_ERROR_OUT_OF_DATE_KHR -> Just code
-                _ -> Nothing
-          )
+        catchJust outOfDateOrSuboptimal
           (drawFrame ctx sync >> go rest)
-          (\_ -> return False)
+          (const wantNewSwapchain)
+
+    outOfDateOrSuboptimal (VulkanException code _) =
+      case code of
+        Just VK_SUBOPTIMAL_KHR -> Just code
+        Just VK_ERROR_OUT_OF_DATE_KHR -> Just code
+        _ -> Nothing
+
+    done = return True
+
+    wantNewSwapchain = do
+      deviceWaitIdle device
+      return False
 
 drawFrame
   :: MonadIO m
   => Context
-  -> (VkSemaphore, VkSemaphore, VkFence)
+  -> SyncSet
   -> m ()
-drawFrame Context{..} (imageAvailableSemaphore, renderFinishedSemaphore, inFlightFence) = do
+drawFrame Context{..} SyncSet{..} = do
     waitForFences device [inFlightFence] maxBound
     resized <- liftIO $ readMVar resizedFlag
     when resized $ do
