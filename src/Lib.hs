@@ -13,15 +13,14 @@ module Lib
     ) where
 
 import           Control.Concurrent.MVar
+import           Control.Exception
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
 import           Data.Bits
 import           Foreign.C.String
 import           Foreign.Extra
-import           Foreign.Marshal.Alloc
 import           Foreign.Marshal.Array
-import           Foreign.Storable
 import qualified Graphics.UI.GLFW                       as GLFW
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0
@@ -95,7 +94,7 @@ data Status a
   | OutOfDate
   deriving (Eq, Show, Functor)
 
-withContext :: Config -> (Context -> IO (Status a)) -> IO a
+withContext :: Config -> (Context -> IO Bool) -> IO ()
 withContext Config{..} action = runResourceT $ do
   glfw
   glfwReqExts               <- requiredGLFWExtensions
@@ -126,7 +125,7 @@ withContext Config{..} action = runResourceT $ do
 
   let
     swapchainLoop = do
-      status <- runResourceT $ do
+      done <- runResourceT $ do
         resetFlag resizedFlag
         (framebufferWidth, framebufferHeight)
                             <- liftIO $ GLFW.getFramebufferSize window
@@ -175,61 +174,57 @@ withContext Config{..} action = runResourceT $ do
 
       -- Swap chain resources will be freed after runResourceT here
 
-      case status of
-        Done a -> return a
-        Resized -> swapchainLoop
-        Suboptimal -> swapchainLoop
-        OutOfDate -> swapchainLoop
+      -- VK_SUBOPTIMAL_KHR -> logMsg "vkQueuePresentKHR: Suboptimal." >> return Suboptimal
+      -- VK_ERROR_OUT_OF_DATE_KHR -> logMsg "vkQueuePresentKHR: Out of date." >> return OutOfDate
+        -- deviceWaitIdle device
+      unless done swapchainLoop
 
   liftIO swapchainLoop
 
 test :: IO ()
 test = withContext defaultConfig mainloop
 
-mainloop :: Context -> IO (Status ())
+mainloop :: Context -> IO Bool
 mainloop ctx@Context{..} = go (cycle syncs)
   where
-    go [] = logMsg "No syncs!" >> return (Done ())
+    go [] = logMsg "No syncs!" >> return True
     go (sync : rest) = do
       liftIO GLFW.pollEvents
       shouldClose <- liftIO $ GLFW.windowShouldClose window
       if shouldClose
       then
-        return $ Done ()
-      else do
-        status <- drawFrame ctx sync
-        case status of
-          Done () -> go rest
-          a       -> return a
+        return True
+      else
+        catchJust
+          (\(VulkanException code _) ->
+              case code of
+                Just VK_SUBOPTIMAL_KHR -> Just code
+                Just VK_ERROR_OUT_OF_DATE_KHR -> Just code
+                _ -> Nothing
+          )
+          (drawFrame ctx sync >> go rest)
+          (\_ -> return False)
 
 drawFrame
   :: MonadIO m
   => Context
   -> (VkSemaphore, VkSemaphore, VkFence)
-  -> m (Status ())
-drawFrame Context{..} (imageAvailableSemaphore, renderFinishedSemaphore, inFlightFence)= do
+  -> m ()
+drawFrame Context{..} (imageAvailableSemaphore, renderFinishedSemaphore, inFlightFence) = do
     waitForFences device [inFlightFence] maxBound
     resized <- liftIO $ readMVar resizedFlag
-    next <-
-      if resized
-      then do
+    when resized $ do
         logMsg "GLFW reported resize"
-        return Resized
-      else
-        acquireNextImage device swapChain maxBound imageAvailableSemaphore VK_NULL
-    case next of
-      Done imageIndex -> do
-        resetFences device [inFlightFence]
-        submitQueue
-          graphicsQueue
-          [(imageAvailableSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)]
-          [renderFinishedSemaphore]
-          inFlightFence
-          [cmdBuffers !! fromIntegral imageIndex]
-        present presentQueue [swapChain] [renderFinishedSemaphore] [imageIndex]
-      status -> do
-        deviceWaitIdle device
-        return $ void status
+        throwVkResult "Window resized" VK_ERROR_OUT_OF_DATE_KHR
+    imageIndex <- acquireNextImage device swapChain maxBound imageAvailableSemaphore VK_NULL
+    resetFences device [inFlightFence]
+    submitQueue
+      graphicsQueue
+      [(imageAvailableSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)]
+      [renderFinishedSemaphore]
+      inFlightFence
+      [cmdBuffers !! fromIntegral imageIndex]
+    present presentQueue [swapChain] [renderFinishedSemaphore] [imageIndex]
 
 present
  :: MonadIO m
@@ -237,15 +232,11 @@ present
  -> [VkSwapchainKHR]
  -> [VkSemaphore]
  -> [Word32]
- -> m (Status ())
+ -> m ()
 present queue swapChains wait imageIndices = liftIO $
-  withPtr presentInfo $ \ptr -> do
-    result <- vkQueuePresentKHR queue ptr
-    case result of
-      VK_SUCCESS -> return $ Done ()
-      VK_SUBOPTIMAL_KHR -> logMsg "vkQueuePresentKHR: Suboptimal." >> return Suboptimal
-      VK_ERROR_OUT_OF_DATE_KHR -> logMsg "vkQueuePresentKHR: Out of date." >> return OutOfDate
-      err        -> throwVkResult "vkQueuePresentKHR: Failed to submit present request." err >> return (Done ())
+  withPtr presentInfo $
+    vkQueuePresentKHR queue
+      >=> throwVkResult "vkQueuePresentKHR: Failed to submit present request."
   where
     presentInfo = createVk @VkPresentInfoKHR
       $  set           @"sType" VK_STRUCTURE_TYPE_PRESENT_INFO_KHR
@@ -289,21 +280,16 @@ acquireNextImage
   -> Word64
   -> VkSemaphore
   -> VkFence
-  -> m (Status Word32)
+  -> m Word32
 acquireNextImage device swapChain timeout semaphore_ fence_ = liftIO $
-  alloca $ \ptr -> do
-    result <- vkAcquireNextImageKHR
+  allocaPeek $
+    vkAcquireNextImageKHR
       device
       swapChain
       timeout
       semaphore_
       fence_
-      ptr
-    case result of
-      VK_SUCCESS -> Done <$> peek ptr
-      VK_SUBOPTIMAL_KHR -> logMsg "vkAcquireNextImageKHR: Out of date." >> return OutOfDate
-      VK_ERROR_OUT_OF_DATE_KHR -> logMsg "vkAcquireNextImageKHR: Out of date." >> return OutOfDate
-      err -> throwVkResult "vkAcquireNextImageKHR: Failed to acquire image." err >> return OutOfDate
+    >=> throwVkResult "vkAcquireNextImageKHR: Failed to acquire image."
 
 pickPhysicalDevice
   :: MonadIO m
