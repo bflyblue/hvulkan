@@ -8,8 +8,10 @@ module Vulkan.Swapchain
   ( swapchain
   , createSwapchain
   , destroySwapchain
-  
+
   , getSwapchainImages
+  , acquireNextImage
+  , queuePresent
   ) where
 
 import           Control.Monad
@@ -139,3 +141,43 @@ getSwapchainImages device chain = liftIO $
   fetchAllMsg
     "getSwapchainImages: Failed to get swapchain images."
     (vkGetSwapchainImagesKHR device chain)
+
+acquireNextImage
+  :: MonadIO m
+  => VkDevice
+  -> VkSwapchainKHR
+  -> Word64
+  -> VkSemaphore
+  -> VkFence
+  -> m Word32
+acquireNextImage device swapChain timeout semaphore_ fence_ = liftIO $
+  allocaPeek $
+    vkAcquireNextImageKHR
+      device
+      swapChain
+      timeout
+      semaphore_
+      fence_
+    >=> throwVkResult "vkAcquireNextImageKHR: Failed to acquire image."
+
+queuePresent
+ :: MonadIO m
+ => VkQueue
+ -> [VkSwapchainKHR]
+ -> [VkSemaphore]
+ -> [Word32]
+ -> m ()
+queuePresent queue swapChains wait imageIndices = liftIO $
+  withPtr presentInfo $
+    vkQueuePresentKHR queue
+      >=> throwVkResult "vkQueuePresentKHR: Failed to submit present request."
+  where
+    presentInfo = createVk @VkPresentInfoKHR
+      $  set           @"sType" VK_STRUCTURE_TYPE_PRESENT_INFO_KHR
+      &* set           @"pNext" VK_NULL
+      &* set           @"waitSemaphoreCount" (fromIntegral $ length wait)
+      &* setListRef    @"pWaitSemaphores" wait
+      &* set           @"swapchainCount" (fromIntegral $ length swapChains)
+      &* setListRef    @"pSwapchains" swapChains
+      &* setListRef    @"pImageIndices" imageIndices
+      &* set           @"pResults" VK_NULL

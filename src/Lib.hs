@@ -18,8 +18,6 @@ import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
 import           Data.Bits
 import           Foreign.C.String
-import           Foreign.Extra
-import           Foreign.Marshal.Array
 import qualified Graphics.UI.GLFW                       as GLFW
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0
@@ -219,78 +217,13 @@ drawFrame Context{..} SyncSet{..} = do
         throwVkResult "Window resized" VK_ERROR_OUT_OF_DATE_KHR
     imageIndex <- acquireNextImage device swapChain maxBound imageAvailableSemaphore VK_NULL
     resetFences device [inFlightFence]
-    submitQueue
+    queueSubmit
       graphicsQueue
       [(imageAvailableSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)]
       [renderFinishedSemaphore]
       inFlightFence
       [cmdBuffers !! fromIntegral imageIndex]
-    present presentQueue [swapChain] [renderFinishedSemaphore] [imageIndex]
-
-present
- :: MonadIO m
- => VkQueue
- -> [VkSwapchainKHR]
- -> [VkSemaphore]
- -> [Word32]
- -> m ()
-present queue swapChains wait imageIndices = liftIO $
-  withPtr presentInfo $
-    vkQueuePresentKHR queue
-      >=> throwVkResult "vkQueuePresentKHR: Failed to submit present request."
-  where
-    presentInfo = createVk @VkPresentInfoKHR
-      $  set           @"sType" VK_STRUCTURE_TYPE_PRESENT_INFO_KHR
-      &* set           @"pNext" VK_NULL
-      &* set           @"waitSemaphoreCount" (fromIntegral $ length wait)
-      &* setListRef    @"pWaitSemaphores" wait
-      &* set           @"swapchainCount" (fromIntegral $ length swapChains)
-      &* setListRef    @"pSwapchains" swapChains
-      &* setListRef    @"pImageIndices" imageIndices
-      &* set           @"pResults" VK_NULL
-
-submitQueue
- :: MonadIO m
- => VkQueue
- -> [(VkSemaphore, VkPipelineStageFlags)]
- -> [VkSemaphore]
- -> VkFence
- -> [VkCommandBuffer]
- -> m ()
-submitQueue queue waits signal fence_ buffers = liftIO $
-  withArrayLen [submitInfo] $ \count siPtr ->
-    vkQueueSubmit queue (fromIntegral count) siPtr fence_
-      >>= throwVkResult "vkQueueSubmit: Failed to submit queue."
-  where
-    (wait, waitStages) = unzip waits
-    submitInfo = createVk @VkSubmitInfo
-      $  set           @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO
-      &* set           @"pNext" VK_NULL
-      &* set           @"waitSemaphoreCount" (fromIntegral $ length waits)
-      &* setListRef    @"pWaitSemaphores" wait
-      &* setListRef    @"pWaitDstStageMask" waitStages
-      &* set           @"signalSemaphoreCount" (fromIntegral $ length signal)
-      &* setListRef    @"pSignalSemaphores" signal
-      &* set           @"commandBufferCount" (fromIntegral $ length buffers)
-      &* setListRef    @"pCommandBuffers" buffers
-
-acquireNextImage
-  :: MonadIO m
-  => VkDevice
-  -> VkSwapchainKHR
-  -> Word64
-  -> VkSemaphore
-  -> VkFence
-  -> m Word32
-acquireNextImage device swapChain timeout semaphore_ fence_ = liftIO $
-  allocaPeek $
-    vkAcquireNextImageKHR
-      device
-      swapChain
-      timeout
-      semaphore_
-      fence_
-    >=> throwVkResult "vkAcquireNextImageKHR: Failed to acquire image."
+    queuePresent presentQueue [swapChain] [renderFinishedSemaphore] [imageIndex]
 
 pickPhysicalDevice
   :: MonadIO m
@@ -376,10 +309,6 @@ pickPhysicalDevice vkInstance surface requiredExtensions = liftIO $ do
     logPresentModes presentModes =
       logMsg $ unwords [ "Surface Present Modes:", unwords (map show presentModes)]
 
-isGraphicsQueueFamily :: VkQueueFamilyProperties -> Bool
-isGraphicsQueueFamily queue =
-  getField @"queueFlags" queue .&. VK_QUEUE_GRAPHICS_BIT /= zeroBits
-
 findGraphicsQueueFamilyIndex
   :: MonadIO m
   => [VkQueueFamilyProperties]
@@ -392,6 +321,9 @@ findGraphicsQueueFamilyIndex queues = liftIO $ do
       return queueFamilyIndex
     Nothing ->
       throwVkMsg "No suitable graphics queue family!"
+  where
+    isGraphicsQueueFamily queue =
+      getField @"queueFlags" queue .&. VK_QUEUE_GRAPHICS_BIT /= zeroBits
 
 findPresentQueueFamilyIndex
   :: MonadIO m
@@ -411,22 +343,11 @@ findPresentQueueFamilyIndex vkInstance physicalDevice surface queues = liftIO $ 
   where
     isSuitableFamily familyIndex =
       (&&) <$> isPresentQueueFamily familyIndex
-           <*> canPresentSurface physicalDevice familyIndex surface
+           <*> supportsSurface physicalDevice familyIndex surface
     isPresentQueueFamily =
       GLFW.getPhysicalDevicePresentationSupport
         vkInstance
         physicalDevice
-
-getDeviceQueue :: MonadIO m => VkDevice -> Word32 -> Word32 -> m VkQueue
-getDeviceQueue device familyIndex index = liftIO $
-  allocaPeek $ vkGetDeviceQueue device familyIndex index
-
-canPresentSurface :: MonadIO m => VkPhysicalDevice -> Word32 -> VkSurfaceKHR -> m Bool
-canPresentSurface physicalDevice familyIndex surface = liftIO $
-  (== VK_TRUE) <$> allocaPeek
-  ( vkGetPhysicalDeviceSurfaceSupportKHR physicalDevice familyIndex surface
-      >=> throwVkResult "vkGetPhysicalDeviceSurfaceSupportKHR: Failed to get surface support."
-  )
 
 pickSwapchain
   :: VkPhysicalDevice

@@ -7,6 +7,8 @@ module Vulkan.CommandBuffer
   ( commandBuffers
   , allocateCommandBuffers
   , freeCommandBuffers
+
+  , queueSubmit
   ) where
 
 import           Control.Monad
@@ -63,3 +65,28 @@ freeCommandBuffers device pool buffers = liftIO $
   withArrayLen buffers $ \count pBuffers ->
     vkFreeCommandBuffers device pool (fromIntegral count) pBuffers
       <* logMsg "Freed command buffers"
+
+queueSubmit
+ :: MonadIO m
+ => VkQueue
+ -> [(VkSemaphore, VkPipelineStageFlags)]
+ -> [VkSemaphore]
+ -> VkFence
+ -> [VkCommandBuffer]
+ -> m ()
+queueSubmit queue waits signal fence_ buffers = liftIO $
+  withArrayLen [submitInfo] $ \count siPtr ->
+    vkQueueSubmit queue (fromIntegral count) siPtr fence_
+      >>= throwVkResult "vkQueueSubmit: Failed to submit queue."
+  where
+    (wait, waitStages) = unzip waits
+    submitInfo = createVk @VkSubmitInfo
+      $  set           @"sType" VK_STRUCTURE_TYPE_SUBMIT_INFO
+      &* set           @"pNext" VK_NULL
+      &* set           @"waitSemaphoreCount" (fromIntegral $ length waits)
+      &* setListRef    @"pWaitSemaphores" wait
+      &* setListRef    @"pWaitDstStageMask" waitStages
+      &* set           @"signalSemaphoreCount" (fromIntegral $ length signal)
+      &* setListRef    @"pSignalSemaphores" signal
+      &* set           @"commandBufferCount" (fromIntegral $ length buffers)
+      &* setListRef    @"pCommandBuffers" buffers

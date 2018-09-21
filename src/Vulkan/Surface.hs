@@ -9,6 +9,7 @@ module Vulkan.Surface
   , getPhysicalDeviceSurfacePresentModes
 
   , supportsSwapchain
+  , supportsSurface
   ) where
 
 import           Control.Monad
@@ -68,3 +69,10 @@ supportsSwapchain minImageCount acceptableFormats acceptablePresentModes device 
     supportsAny Nothing _ = True
     supportsAny (Just acceptable) supported =
       not $ Set.disjoint (Set.fromList acceptable) (Set.fromList supported)
+
+supportsSurface :: VkPhysicalDevice -> Word32 -> VkSurfaceKHR -> IO Bool
+supportsSurface physicalDevice familyIndex surface =
+  (== VK_TRUE) <$> allocaPeek
+    ( vkGetPhysicalDeviceSurfaceSupportKHR physicalDevice familyIndex surface
+        >=> throwVkResult "vkGetPhysicalDeviceSurfaceSupportKHR: Failed to get surface support."
+    )

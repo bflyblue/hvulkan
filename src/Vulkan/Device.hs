@@ -9,6 +9,7 @@ module Vulkan.Device
   , destroyDevice
 
   , deviceWaitIdle
+  , getDeviceQueue
   ) where
 
 import           Control.Monad
@@ -84,3 +85,7 @@ deviceWaitIdle :: MonadIO m => VkDevice -> m ()
 deviceWaitIdle device = liftIO $
   vkDeviceWaitIdle device
    >>= throwVkResult "vkDeviceWaitIdle: Failed to wait for idle."
+
+getDeviceQueue :: MonadIO m => VkDevice -> Word32 -> Word32 -> m VkQueue
+getDeviceQueue device familyIndex index = liftIO $
+  allocaPeek $ vkGetDeviceQueue device familyIndex index
