@@ -4,6 +4,7 @@
 {-# LANGUAGE NegativeLiterals    #-}
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications    #-}
 {-# LANGUAGE TypeFamilies        #-}
 
@@ -21,13 +22,16 @@ import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
 import           Data.Bits
 import           Foreign.C.String
+import           Foreign.C.Types
 import qualified Graphics.UI.GLFW                       as GLFW
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0
 import           Graphics.Vulkan.Ext.VK_KHR_surface
 import           Graphics.Vulkan.Ext.VK_KHR_swapchain
 import           Graphics.Vulkan.Marshal.Create
+import           Linear
 import           Log
+import           Record
 import           Safe
 
 import           Vulkan.CommandBuffer
@@ -92,6 +96,13 @@ data Context = Context
   , graphicsCommandPool       :: VkCommandPool
   , cmdBuffers                :: [VkCommandBuffer]
   }
+
+data Vertex = Vertex
+  { vPosition                 :: !(V2 CFloat)
+  , vColor                    :: !(V3 CFloat)
+  }
+
+makeRecord ''Vertex
 
 withContext :: Config -> (Context -> IO Bool) -> IO ()
 withContext Config{..} action = runResourceT $ do
@@ -461,15 +472,39 @@ createGraphicsPipeline device format swapExtent = do
         &* setStrRef  @"pName" "main"
         &* set        @"pSpecializationInfo" VK_NULL
 
+    bindingDescription =
+      createVk @VkVertexInputBindingDescription
+        $  set        @"binding" 0
+        &* set        @"stride" (fromIntegral vertexSize)
+        &* set        @"inputRate" VK_VERTEX_INPUT_RATE_VERTEX
+
+    positionAttributeDescription =
+      createVk @VkVertexInputAttributeDescription
+        $  set        @"binding" 0
+        &* set        @"location" 0
+        &* set        @"format" VK_FORMAT_R32G32_SFLOAT
+        &* set        @"offset" (fromIntegral vPositionOffset)
+
+    colorAttributeDescription =
+      createVk @VkVertexInputAttributeDescription
+        $  set        @"binding" 0
+        &* set        @"location" 0
+        &* set        @"format" VK_FORMAT_R32G32B32_SFLOAT
+        &* set        @"offset" (fromIntegral vColorOffset)
+
+    bindings = [ bindingDescription ]
+
+    attributes = [ positionAttributeDescription, colorAttributeDescription ]
+
     vertexInputInfo =
       createVk @VkPipelineVertexInputStateCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
         &* set        @"pNext" VK_NULL
         &* set        @"flags" 0
-        &* set        @"vertexBindingDescriptionCount" 0
-        &* set        @"pVertexBindingDescriptions" VK_NULL
-        &* set        @"vertexAttributeDescriptionCount" 0
-        &* set        @"pVertexAttributeDescriptions" VK_NULL
+        &* set        @"vertexBindingDescriptionCount" (fromIntegral $ length bindings)
+        &* setListRef @"pVertexBindingDescriptions" bindings
+        &* set        @"vertexAttributeDescriptionCount" (fromIntegral $ length attributes)
+        &* setListRef @"pVertexAttributeDescriptions" attributes
 
     inputAssembly =
       createVk @VkPipelineInputAssemblyStateCreateInfo
