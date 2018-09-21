@@ -120,7 +120,12 @@ withContext Config{..} action = runResourceT $ do
                                  graphicsQueueFamilyIndex
   graphicsQueue             <- getDeviceQueue device graphicsQueueFamilyIndex 0
   presentQueue              <- getDeviceQueue device presentQueueFamilyIndex 0
-  vertexBuffer              <- createVertexBuffer physicalDevice device
+  graphicsCommandPool       <- commandPool device graphicsQueueFamilyIndex
+  vertexBuffer              <- createVertexBuffer
+                                 physicalDevice
+                                 device
+                                 graphicsCommandPool
+                                 graphicsQueue
 
   let
     swapchainLoop = do
@@ -152,9 +157,8 @@ withContext Config{..} action = runResourceT $ do
                                  renderpass
                                  swapExtent
                                  views
-        graphicsCommandPool <- commandPool
-                                 device
-                                 graphicsQueueFamilyIndex
+        liftIO $ vkResetCommandPool device graphicsCommandPool VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT
+          >>= throwVkResult "vkResetCommandPool: Failed to reset command pool."
         cmdBuffers          <- createCommandBuffers
                                  device
                                  graphicsCommandPool
@@ -619,6 +623,13 @@ extent2D width height =
     $  set @"width" width
     &* set @"height" height
 
+bufferCopy :: VkDeviceSize -> VkDeviceSize -> VkDeviceSize -> VkBufferCopy
+bufferCopy srcOffset dstOffset size =
+  createVk @VkBufferCopy
+    $  set @"srcOffset" srcOffset
+    &* set @"dstOffset" dstOffset
+    &* set @"size" size
+
 createFramebuffers
   :: VkDevice
   -> VkRenderPass
@@ -631,35 +642,85 @@ createFramebuffers device renderpass extent_ =
 createVertexBuffer
   :: VkPhysicalDevice
   -> VkDevice
+  -> VkCommandPool
+  -> VkQueue
   -> ResIO VkBuffer
-createVertexBuffer physicalDevice device = do
+createVertexBuffer physicalDevice device pool graphicsQueue = do
   let vertices = Vector.fromList
                   [ Vertex (V2 0.0 -0.5) (V3 1.0 0.0 0.0)
                   , Vertex (V2 0.5  0.5) (V3 0.0 1.0 0.0)
                   , Vertex (V2 -0.5 0.5) (V3 0.0 0.0 1.0)
                   ]
-      byteLength = fromIntegral $ vertexSize * Vector.length vertices
+      verticesSize = fromIntegral $ vertexSize * Vector.length vertices
 
-  vertexBuffer        <- buffer
-                           device
-                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
-                           byteLength
-                           VK_SHARING_MODE_EXCLUSIVE
-                           []
-  requirements        <- getBufferMemoryRequirements
-                           device
-                           vertexBuffer
-  vertexBufferMemory  <- memoryFor
-                           physicalDevice
-                           device
-                           requirements
-                           (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-  bindBufferMemory device vertexBuffer vertexBufferMemory 0
-  mapPtr <- mapMemory device vertexBufferMemory 0 byteLength 0
+  (stagingBuffer, stagingBufferMemory)
+         <- createBuffer'
+              physicalDevice
+              device
+              verticesSize
+              VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+              (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+  mapPtr <- mapMemory device stagingBufferMemory 0 verticesSize 0
   liftIO $ Vector.unsafeWith vertices $ \ptr ->
-    copyBytes mapPtr ptr (fromIntegral byteLength)
-  unmapMemory device vertexBufferMemory
+    copyBytes mapPtr ptr (fromIntegral verticesSize)
+  unmapMemory device stagingBufferMemory
+
+  (vertexBuffer, _vertexBufferMemory)
+         <- createBuffer'
+              physicalDevice
+              device
+              verticesSize
+              (VK_BUFFER_USAGE_TRANSFER_DST_BIT .|. VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+  copyBuffer device pool graphicsQueue stagingBuffer vertexBuffer verticesSize
+
+  -- TODO free staging buffer/memory
+
   return vertexBuffer
+
+copyBuffer
+  :: VkDevice
+  -> VkCommandPool
+  -> VkQueue
+  -> VkBuffer
+  -> VkBuffer
+  -> VkDeviceSize
+  -> ResIO ()
+copyBuffer device pool graphicsQueue src dst size = do
+  [cmd] <- commandBuffers device pool 1
+  beginCommandBuffer cmd VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+  liftIO $ withPtr copyRegion $ vkCmdCopyBuffer cmd src dst 1
+  endCommandBuffer cmd
+  queueSubmit graphicsQueue [] [] VK_NULL [cmd]
+  queueWaitIdle graphicsQueue
+  where
+    copyRegion = bufferCopy 0 0 size
+
+createBuffer'
+  :: VkPhysicalDevice
+  -> VkDevice
+  -> VkDeviceSize
+  -> VkBufferUsageFlags
+  -> VkMemoryPropertyFlags
+  -> ResIO (VkBuffer, VkDeviceMemory)
+createBuffer' physicalDevice device size usage flags = do
+  buffer_       <- buffer
+                     device
+                     usage
+                     size
+                     VK_SHARING_MODE_EXCLUSIVE
+                     []
+  requirements  <- getBufferMemoryRequirements
+                     device
+                     buffer_
+  bufferMemory  <- memoryFor
+                     physicalDevice
+                     device
+                     requirements
+                     flags
+
+  bindBufferMemory device buffer_ bufferMemory 0
+  return (buffer_, bufferMemory)
 
 createCommandBuffers
   :: VkDevice
@@ -688,23 +749,6 @@ createCommandBuffers device pool frameBuffers renderpass extent_ pipeline vertex
   return cmdBuffers
 
   where
-    beginCommandBuffer buffer_ flags =
-      let
-        beginInfo = createVk @VkCommandBufferBeginInfo
-          $  set           @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-          &* set           @"pNext" VK_NULL
-          &* set           @"flags" flags
-          &* set           @"pInheritanceInfo" VK_NULL
-      in
-        withPtr beginInfo
-          ( vkBeginCommandBuffer buffer_
-              >=> throwVkResult "vkBeginCommandBuffer: Failed to begin command buffer."
-          )
-
-    endCommandBuffer buffer_ =
-      vkEndCommandBuffer buffer_
-        >>= throwVkResult "vkEndCommandBuffer: Failed to record command buffer."
-
     beginRenderPass buffer_ framebuffer_ =
       let
         area = rect2D (offset2D 0 0) extent_

@@ -8,7 +8,11 @@ module Vulkan.CommandBuffer
   , allocateCommandBuffers
   , freeCommandBuffers
 
+  , beginCommandBuffer
+  , endCommandBuffer
+
   , queueSubmit
+  , queueWaitIdle
   ) where
 
 import           Control.Monad
@@ -66,6 +70,31 @@ freeCommandBuffers device pool buffers = liftIO $
     vkFreeCommandBuffers device pool (fromIntegral count) pBuffers
       <* logMsg "Freed command buffers"
 
+beginCommandBuffer
+  :: MonadIO m
+  => VkCommandBuffer
+  -> VkCommandBufferUsageFlags
+  -> m ()
+beginCommandBuffer buffer_ flags = liftIO $
+  withPtr beginInfo
+    ( vkBeginCommandBuffer buffer_
+        >=> throwVkResult "vkBeginCommandBuffer: Failed to begin command buffer."
+    )
+  where
+    beginInfo = createVk @VkCommandBufferBeginInfo
+      $  set           @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+      &* set           @"pNext" VK_NULL
+      &* set           @"flags" flags
+      &* set           @"pInheritanceInfo" VK_NULL
+
+endCommandBuffer
+  :: MonadIO m
+  => VkCommandBuffer
+  -> m ()
+endCommandBuffer buffer_ = liftIO $
+  vkEndCommandBuffer buffer_
+    >>= throwVkResult "vkEndCommandBuffer: Failed to record command buffer."
+
 queueSubmit
  :: MonadIO m
  => VkQueue
@@ -90,3 +119,8 @@ queueSubmit queue waits signal fence_ buffers = liftIO $
       &* setListRef    @"pSignalSemaphores" signal
       &* set           @"commandBufferCount" (fromIntegral $ length buffers)
       &* setListRef    @"pCommandBuffers" buffers
+
+queueWaitIdle :: MonadIO m => VkQueue -> m ()
+queueWaitIdle queue = liftIO $
+  vkQueueWaitIdle queue
+   >>= throwVkResult "vkQueueWaitIdle: Failed to wait for idle."
