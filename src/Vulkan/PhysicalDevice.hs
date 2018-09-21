@@ -9,6 +9,7 @@ module Vulkan.PhysicalDevice
   , physicalDeviceProperties
   , physicalDeviceFeatures
   , physicalDeviceQueueFamiliesProperties
+  , physicalDeviceMemoryProperties 
 
   , isGpu
   , supportsExtensions
@@ -46,6 +47,9 @@ physicalDeviceFeatures = liftIO . allocaPeek . vkGetPhysicalDeviceFeatures
 
 physicalDeviceQueueFamiliesProperties :: MonadIO m => VkPhysicalDevice -> m [VkQueueFamilyProperties]
 physicalDeviceQueueFamiliesProperties = liftIO . fetchAll . vkGetPhysicalDeviceQueueFamilyProperties
+
+physicalDeviceMemoryProperties :: MonadIO m => VkPhysicalDevice -> m VkPhysicalDeviceMemoryProperties
+physicalDeviceMemoryProperties = liftIO . allocaPeek . vkGetPhysicalDeviceMemoryProperties
 
 isGpu :: MonadIO m => VkPhysicalDevice -> m Bool
 isGpu device = do

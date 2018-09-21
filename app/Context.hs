@@ -21,8 +21,10 @@ import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
 import           Data.Bits
+import qualified Data.Vector.Storable                   as Vector
 import           Foreign.C.String
 import           Foreign.C.Types
+import           Foreign.Marshal
 import qualified Graphics.UI.GLFW                       as GLFW
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0
@@ -34,22 +36,7 @@ import           Log
 import           Record
 import           Safe
 
-import           Vulkan.CommandBuffer
-import           Vulkan.CommandPool
-import           Vulkan.Device
-import           Vulkan.Exception
-import           Vulkan.Fence
-import           Vulkan.Framebuffer
-import           Vulkan.ImageView
-import           Vulkan.Instance
-import           Vulkan.PhysicalDevice
-import           Vulkan.Pipeline
-import           Vulkan.RenderPass
-import           Vulkan.Semaphore
-import           Vulkan.ShaderModule
-import           Vulkan.Surface
-import           Vulkan.Swapchain
-import           Vulkan.WSI
+import           Vulkan
 
 data Config = Config
   { layers        :: [String]
@@ -95,6 +82,7 @@ data Context = Context
   , framebuffers              :: [VkFramebuffer]
   , graphicsCommandPool       :: VkCommandPool
   , cmdBuffers                :: [VkCommandBuffer]
+  , vertexBuffer              :: VkBuffer
   }
 
 data Vertex = Vertex
@@ -132,6 +120,7 @@ withContext Config{..} action = runResourceT $ do
                                  graphicsQueueFamilyIndex
   graphicsQueue             <- getDeviceQueue device graphicsQueueFamilyIndex 0
   presentQueue              <- getDeviceQueue device presentQueueFamilyIndex 0
+  vertexBuffer              <- createVertexBuffer physicalDevice device
 
   let
     swapchainLoop = do
@@ -173,6 +162,7 @@ withContext Config{..} action = runResourceT $ do
                                  renderpass
                                  swapExtent
                                  pipeline
+                                 vertexBuffer
         syncs               <- replicateM 3 (syncSet device)
 
         liftIO $ action Context{..}
@@ -488,7 +478,7 @@ createGraphicsPipeline device format swapExtent = do
     colorAttributeDescription =
       createVk @VkVertexInputAttributeDescription
         $  set        @"binding" 0
-        &* set        @"location" 0
+        &* set        @"location" 1
         &* set        @"format" VK_FORMAT_R32G32B32_SFLOAT
         &* set        @"offset" (fromIntegral vColorOffset)
 
@@ -638,6 +628,39 @@ createFramebuffers
 createFramebuffers device renderpass extent_ =
   mapM (\attachment -> framebuffer device renderpass extent_ [attachment])
 
+createVertexBuffer
+  :: VkPhysicalDevice
+  -> VkDevice
+  -> ResIO VkBuffer
+createVertexBuffer physicalDevice device = do
+  let vertices = Vector.fromList
+                  [ Vertex (V2 0.0 -0.5) (V3 1.0 0.0 0.0)
+                  , Vertex (V2 0.5  0.5) (V3 0.0 1.0 0.0)
+                  , Vertex (V2 -0.5 0.5) (V3 0.0 0.0 1.0)
+                  ]
+      byteLength = fromIntegral $ vertexSize * Vector.length vertices
+
+  vertexBuffer        <- buffer
+                           device
+                           VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+                           byteLength
+                           VK_SHARING_MODE_EXCLUSIVE
+                           []
+  requirements        <- getBufferMemoryRequirements
+                           device
+                           vertexBuffer
+  vertexBufferMemory  <- memoryFor
+                           physicalDevice
+                           device
+                           requirements
+                           (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+  bindBufferMemory device vertexBuffer vertexBufferMemory 0
+  mapPtr <- mapMemory device vertexBufferMemory 0 byteLength 0
+  liftIO $ Vector.unsafeWith vertices $ \ptr ->
+    copyBytes mapPtr ptr (fromIntegral byteLength)
+  unmapMemory device vertexBufferMemory
+  return vertexBuffer
+
 createCommandBuffers
   :: VkDevice
   -> VkCommandPool
@@ -645,8 +668,9 @@ createCommandBuffers
   -> VkRenderPass
   -> VkExtent2D
   -> VkPipeline
+  -> VkBuffer
   -> ResIO [VkCommandBuffer]
-createCommandBuffers device pool frameBuffers renderpass extent_ pipeline = do
+createCommandBuffers device pool frameBuffers renderpass extent_ pipeline vertexBuffer = do
   cmdBuffers <- commandBuffers device pool (length frameBuffers)
 
   liftIO $
@@ -654,6 +678,9 @@ createCommandBuffers device pool frameBuffers renderpass extent_ pipeline = do
       beginCommandBuffer cmd VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
       beginRenderPass cmd frameBuffer_
       vkCmdBindPipeline cmd VK_PIPELINE_BIND_POINT_GRAPHICS pipeline
+      withArrayLen [vertexBuffer] $ \_ buffersPtr ->
+        withArrayLen [0] $ \_ offsetsPtr ->
+        vkCmdBindVertexBuffers cmd 0 1 buffersPtr offsetsPtr
       vkCmdDraw cmd 3 1 0 0
       vkCmdEndRenderPass cmd
       endCommandBuffer cmd
@@ -661,7 +688,7 @@ createCommandBuffers device pool frameBuffers renderpass extent_ pipeline = do
   return cmdBuffers
 
   where
-    beginCommandBuffer buffer flags =
+    beginCommandBuffer buffer_ flags =
       let
         beginInfo = createVk @VkCommandBufferBeginInfo
           $  set           @"sType" VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
@@ -670,15 +697,15 @@ createCommandBuffers device pool frameBuffers renderpass extent_ pipeline = do
           &* set           @"pInheritanceInfo" VK_NULL
       in
         withPtr beginInfo
-          ( vkBeginCommandBuffer buffer
+          ( vkBeginCommandBuffer buffer_
               >=> throwVkResult "vkBeginCommandBuffer: Failed to begin command buffer."
           )
 
-    endCommandBuffer buffer =
-      vkEndCommandBuffer buffer
+    endCommandBuffer buffer_ =
+      vkEndCommandBuffer buffer_
         >>= throwVkResult "vkEndCommandBuffer: Failed to record command buffer."
 
-    beginRenderPass buffer framebuffer_ =
+    beginRenderPass buffer_ framebuffer_ =
       let
         area = rect2D (offset2D 0 0) extent_
         clearValue = createVk @VkClearValue
@@ -700,4 +727,4 @@ createCommandBuffers device pool frameBuffers renderpass extent_ pipeline = do
           &* setListRef    @"pClearValues" [clearValue]
       in
         withPtr renderPassInfo $ \rpiPtr ->
-          vkCmdBeginRenderPass buffer rpiPtr VK_SUBPASS_CONTENTS_INLINE
+          vkCmdBeginRenderPass buffer_ rpiPtr VK_SUBPASS_CONTENTS_INLINE
