@@ -14,8 +14,8 @@ module Vulkan.Fence
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
+import           Foreign
 import           Foreign.Extra
-import           Foreign.Marshal.Array
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0
 import           Graphics.Vulkan.Marshal.Create

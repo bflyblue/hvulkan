@@ -1,9 +1,6 @@
 module Foreign.Extra where
 
-import           Foreign.Marshal.Alloc
-import           Foreign.Marshal.Array
-import           Foreign.Ptr
-import           Foreign.Storable
+import           Foreign
 
 allocaPeek
   :: Storable a

@@ -9,7 +9,7 @@ module Vulkan.PhysicalDevice
   , physicalDeviceProperties
   , physicalDeviceFeatures
   , physicalDeviceQueueFamiliesProperties
-  , physicalDeviceMemoryProperties 
+  , physicalDeviceMemoryProperties
 
   , isGpu
   , supportsExtensions
@@ -21,7 +21,7 @@ module Vulkan.PhysicalDevice
 import           Control.Monad.IO.Class
 import           Data.Bits
 import qualified Data.Set                 as Set
-import           Foreign.C.String
+import           Foreign.C
 import           Foreign.Extra
 import           Graphics.Vulkan.Core_1_0
 

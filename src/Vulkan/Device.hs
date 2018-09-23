@@ -15,7 +15,7 @@ module Vulkan.Device
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
-import           Foreign.C.String
+import           Foreign.C
 import           Foreign.Extra
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0

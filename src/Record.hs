@@ -2,14 +2,12 @@
 
 module Record
     ( makeRecord
-    , module Foreign.Ptr
-    , module Foreign.Storable
+    , module Foreign
     )
 where
 
 import           Data.Char
-import           Foreign.Ptr
-import           Foreign.Storable
+import           Foreign
 import           Language.Haskell.TH
 
 {-

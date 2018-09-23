@@ -24,9 +24,9 @@ import           Control.Exception
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
-import           Foreign.C.String
+import           Foreign
+import           Foreign.C
 import           Foreign.Extra
-import           Foreign.Ptr
 import qualified Graphics.UI.GLFW                       as GLFW
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Ext.VK_KHR_surface
@@ -89,6 +89,8 @@ createWindow :: MonadIO m => Word32 -> Word32 -> String -> m GLFW.Window
 createWindow width height title = liftIO $ do
    -- We don't require OpenGL context
   GLFW.windowHint $ GLFW.WindowHint'ClientAPI GLFW.ClientAPI'NoAPI
+
+  GLFW.windowHint $ GLFW.WindowHint'Focused True
 
   maybeWindow <-
     GLFW.createWindow

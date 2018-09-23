@@ -12,7 +12,9 @@ import           Control.Concurrent.MVar
 import           Control.Exception
 import           Control.Monad
 import           Control.Monad.IO.Class
+import           Foreign
 import qualified Graphics.UI.GLFW                       as GLFW
+import           Linear
 
 import           Context
 import           Log
@@ -53,7 +55,7 @@ drawFrame
   => Context
   -> SyncSet
   -> m ()
-drawFrame Context{..} SyncSet{..} = do
+drawFrame context@Context{..} SyncSet{..} = do
     waitForFences device [inFlightFence] maxBound
     resized <- liftIO $ readMVar resizedFlag
     when resized $ do
@@ -61,6 +63,7 @@ drawFrame Context{..} SyncSet{..} = do
         throwVkResult "Window resized" VK_ERROR_OUT_OF_DATE_KHR
     imageIndex <- acquireNextImage device swapChain maxBound imageAvailableSemaphore VK_NULL
     resetFences device [inFlightFence]
+    updateUniformBuffer context imageIndex
     queueSubmit
       graphicsQueue
       [(imageAvailableSemaphore, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)]
@@ -68,3 +71,22 @@ drawFrame Context{..} SyncSet{..} = do
       inFlightFence
       [cmdBuffers !! fromIntegral imageIndex]
     queuePresent presentQueue [swapChain] [renderFinishedSemaphore] [imageIndex]
+
+updateUniformBuffer
+  :: MonadIO m
+  => Context
+  -> Word32
+  -> m ()
+updateUniformBuffer Context{..} imageIndex = do
+  let (_, uniformBufferMemory) = ubos !! fromIntegral imageIndex
+  mapPtr <- mapMemory device uniformBufferMemory 0 (fromIntegral uniformBufferObjectSize) 0
+  liftIO $ poke mapPtr ubo
+  unmapMemory device uniformBufferMemory
+  where
+    ubo = UniformBufferObject
+            { uboModel = identity
+            , uboView = identity
+            , uboProj = ortho (negate hw) hw hh (negate hh) (-1) 1
+            }
+    hw = fromIntegral framebufferWidth / 2
+    hh = fromIntegral framebufferHeight / 2

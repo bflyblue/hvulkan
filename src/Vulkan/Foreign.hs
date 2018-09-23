@@ -1,10 +1,8 @@
 module Vulkan.Foreign where
 
 import           Control.Monad
+import           Foreign
 import           Foreign.Extra
-import           Foreign.Marshal.Alloc
-import           Foreign.Ptr
-import           Foreign.Storable
 
 import           Graphics.Vulkan.Core_1_0
 import           Vulkan.Exception

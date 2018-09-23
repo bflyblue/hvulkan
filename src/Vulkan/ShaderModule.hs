@@ -13,8 +13,8 @@ import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
 import qualified Data.ByteString
+import           Foreign
 import           Foreign.Extra
-import           Foreign.Ptr
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0
 import           Graphics.Vulkan.Marshal.Create

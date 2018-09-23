@@ -16,8 +16,8 @@ module Vulkan.Pipeline
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
+import           Foreign
 import           Foreign.Extra
-import           Foreign.Marshal.Array
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0
 import           Graphics.Vulkan.Marshal.Create
@@ -46,14 +46,14 @@ destroyPipeline device pipeline = liftIO $
   vkDestroyPipeline device pipeline VK_NULL
     <* logMsg "Destroyed graphics pipeline"
 
-pipelineLayout :: VkDevice -> ResIO VkPipelineLayout
-pipelineLayout device =
+pipelineLayout :: VkDevice -> [VkDescriptorSetLayout] -> ResIO VkPipelineLayout
+pipelineLayout device setLayouts =
   vulkanResource
-    ( createPipelineLayout device )
+    ( createPipelineLayout device setLayouts )
     ( destroyPipelineLayout device )
 
-createPipelineLayout :: MonadIO m => VkDevice -> m VkPipelineLayout
-createPipelineLayout device = liftIO $
+createPipelineLayout :: MonadIO m => VkDevice -> [VkDescriptorSetLayout] -> m VkPipelineLayout
+createPipelineLayout device setLayouts = liftIO $
   withPtr createInfo $ \ciPtr ->
     allocaPeek
     ( vkCreatePipelineLayout device ciPtr VK_NULL
@@ -66,8 +66,8 @@ createPipelineLayout device = liftIO $
         $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
         &* set        @"pNext" VK_NULL
         &* set        @"flags" 0
-        &* set        @"setLayoutCount" 0
-        &* set        @"pSetLayouts" VK_NULL
+        &* set        @"setLayoutCount" (fromIntegral $ length setLayouts)
+        &* setListRef @"pSetLayouts" setLayouts
         &* set        @"pushConstantRangeCount" 0
         &* set        @"pPushConstantRanges" VK_NULL
 

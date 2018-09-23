@@ -7,6 +7,8 @@ module Vulkan
   , module Vulkan.Buffer
   , module Vulkan.CommandBuffer
   , module Vulkan.CommandPool
+  , module Vulkan.DescriptorPool
+  , module Vulkan.DescriptorSet
   , module Vulkan.Device
   , module Vulkan.Exception
   , module Vulkan.Fence
@@ -32,6 +34,8 @@ import Graphics.Vulkan.Ext.VK_KHR_swapchain
 import Vulkan.Buffer
 import Vulkan.CommandBuffer
 import Vulkan.CommandPool
+import Vulkan.DescriptorPool
+import Vulkan.DescriptorSet
 import Vulkan.Device
 import Vulkan.Exception
 import Vulkan.Fence

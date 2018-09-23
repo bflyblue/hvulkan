@@ -14,6 +14,8 @@ module Context
   , SyncSet (..)
   , defaultConfig
   , withContext
+  , UniformBufferObject (..)
+  , uniformBufferObjectSize
   ) where
 
 import           Control.Concurrent.MVar
@@ -22,9 +24,8 @@ import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
 import           Data.Bits
 import qualified Data.Vector.Storable                   as Vector
-import           Foreign.C.String
-import           Foreign.C.Types
-import           Foreign.Marshal
+import           Foreign
+import           Foreign.C
 import qualified Graphics.UI.GLFW                       as GLFW
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0
@@ -84,6 +85,9 @@ data Context = Context
   , cmdBuffers                :: [VkCommandBuffer]
   , vertexBuffer              :: VkBuffer
   , indexBuffer               :: VkBuffer
+  , ubos                      :: [(VkBuffer, VkDeviceMemory)]
+  , graphicsDescriptorPool    :: VkDescriptorPool
+  , descriptorSets'           :: [VkDescriptorSet]
   }
 
 data Vertex = Vertex
@@ -92,6 +96,14 @@ data Vertex = Vertex
   }
 
 makeRecord ''Vertex
+
+data UniformBufferObject = UniformBufferObject
+  { uboModel                  :: !(M44 CFloat)
+  , uboView                   :: !(M44 CFloat)
+  , uboProj                   :: !(M44 CFloat)
+  }
+
+makeRecord ''UniformBufferObject
 
 withContext :: Config -> (Context -> IO Bool) -> IO ()
 withContext Config{..} action = runResourceT $ do
@@ -132,6 +144,9 @@ withContext Config{..} action = runResourceT $ do
                                  device
                                  graphicsCommandPool
                                  graphicsQueue
+  setLayout                 <- descriptorSetLayout
+                                 device
+                                 [(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT)]
 
   let
     swapchainLoop = do
@@ -153,11 +168,26 @@ withContext Config{..} action = runResourceT $ do
                                  device
                                  swapChain
                                  chainFormat
-        (pipeline, renderpass)
+        let numSwapchainImages = length views
+        graphicsDescriptorPool
+                            <- descriptorPool
+                                 device
+                                 0
+                                 [(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, fromIntegral numSwapchainImages)]
+                                 (fromIntegral numSwapchainImages)
+        ubos                <- replicateM numSwapchainImages $
+                                 createUniformBuffer physicalDevice device
+        descriptorSets'     <- createDescriptorSets
+                                 device
+                                 graphicsDescriptorPool
+                                 setLayout
+                                 ubos
+        (pipeline, pipelineLayout', renderpass)
                             <- createGraphicsPipeline
                                  device
                                  chainFormat
                                  swapExtent
+                                 [setLayout]
         framebuffers        <- createFramebuffers
                                  device
                                  renderpass
@@ -171,8 +201,10 @@ withContext Config{..} action = runResourceT $ do
                                  renderpass
                                  swapExtent
                                  pipeline
+                                 pipelineLayout'
                                  vertexBuffer
                                  indexBuffer
+                                 descriptorSets'
         syncs               <- replicateM 3 (syncSet device)
 
         liftIO $ action Context{..}
@@ -441,18 +473,19 @@ createGraphicsPipeline
   :: VkDevice
   -> VkFormat
   -> VkExtent2D
-  -> ResIO (VkPipeline, VkRenderPass)
-createGraphicsPipeline device format swapExtent = do
+  -> [VkDescriptorSetLayout]
+  -> ResIO (VkPipeline, VkPipelineLayout, VkRenderPass)
+createGraphicsPipeline device format swapExtent setLayouts = do
   vertexShader   <- loadShader device "shaders/vert.spv"
   fragmentShader <- loadShader device "shaders/frag.spv"
   renderpass     <- renderPass device format
-  layout         <- pipelineLayout device
+  layout         <- pipelineLayout device setLayouts
   let vertexStage = vertexShaderStageInfo vertexShader
       fragmentStage = fragmentShaderStageInfo fragmentShader
       vp = viewport 0 0 (fromIntegral $ getField @"width" swapExtent) (fromIntegral $ getField @"height" swapExtent) 0 1
       ss = rect2D (offset2D 0 0) swapExtent
   pipeline <- graphicsPipeline device (pipelineInfo [vertexStage, fragmentStage] (viewportState [vp] [ss]) layout renderpass)
-  return (pipeline, renderpass)
+  return (pipeline, layout, renderpass)
 
   where
     vertexShaderStageInfo shaderModule =
@@ -546,7 +579,7 @@ createGraphicsPipeline device format swapExtent = do
         &* set        @"polygonMode" VK_POLYGON_MODE_FILL
         &* set        @"lineWidth" 1
         &* set        @"cullMode" VK_CULL_MODE_BACK_BIT
-        &* set        @"frontFace" VK_FRONT_FACE_CLOCKWISE
+        &* set        @"frontFace" VK_FRONT_FACE_COUNTER_CLOCKWISE
         &* set        @"depthBiasEnable" VK_FALSE
         &* set        @"depthBiasConstantFactor" 0
         &* set        @"depthBiasClamp" 0
@@ -656,10 +689,10 @@ createVertexBuffer
   -> ResIO VkBuffer
 createVertexBuffer physicalDevice device pool graphicsQueue = do
   let vertices = Vector.fromList
-                  [ Vertex (V2 -0.5 -0.5) (V3 1.0 0.0 0.0)
-                  , Vertex (V2  0.5 -0.5) (V3 0.0 1.0 0.0)
-                  , Vertex (V2  0.5  0.5) (V3 0.0 0.0 1.0)
-                  , Vertex (V2 -0.5  0.5) (V3 1.0 1.0 1.0)
+                  [ Vertex (V2 -50 -50) (V3 1.0 0.0 0.0)
+                  , Vertex (V2  50 -50) (V3 0.0 1.0 0.0)
+                  , Vertex (V2  50  50) (V3 0.0 0.0 1.0)
+                  , Vertex (V2 -50  50) (V3 1.0 1.0 1.0)
                   ]
 
       numVertices  = Vector.length vertices
@@ -726,6 +759,18 @@ createIndexBuffer physicalDevice device pool graphicsQueue = do
 
   return indexBuffer
 
+createUniformBuffer
+  :: VkPhysicalDevice
+  -> VkDevice
+  -> ResIO (VkBuffer, VkDeviceMemory)
+createUniformBuffer physicalDevice device =
+  createBuffer'
+    physicalDevice
+    device
+    (fromIntegral uniformBufferObjectSize)
+    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+    (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+
 copyBuffer
   :: VkDevice
   -> VkCommandPool
@@ -777,14 +822,16 @@ createCommandBuffers
   -> VkRenderPass
   -> VkExtent2D
   -> VkPipeline
+  -> VkPipelineLayout
   -> VkBuffer
   -> VkBuffer
+  -> [VkDescriptorSet]
   -> ResIO [VkCommandBuffer]
-createCommandBuffers device pool frameBuffers renderpass extent_ pipeline vertexBuffer indexBuffer = do
+createCommandBuffers device pool frameBuffers renderpass extent_ pipeline pipelineLayout' vertexBuffer indexBuffer descriptorSets' = do
   cmdBuffers <- commandBuffers device pool (length frameBuffers)
 
   liftIO $
-    forM_ (zip frameBuffers cmdBuffers) $ \(frameBuffer_, cmd) -> do
+    forM_ (zip3 frameBuffers cmdBuffers descriptorSets') $ \(frameBuffer_, cmd, descriptorSet) -> do
       beginCommandBuffer cmd VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
       beginRenderPass cmd frameBuffer_
       vkCmdBindPipeline cmd VK_PIPELINE_BIND_POINT_GRAPHICS pipeline
@@ -792,6 +839,8 @@ createCommandBuffers device pool frameBuffers renderpass extent_ pipeline vertex
         withArrayLen [0] $ \_ offsetsPtr ->
           vkCmdBindVertexBuffers cmd 0 1 buffersPtr offsetsPtr
       vkCmdBindIndexBuffer cmd indexBuffer 0 VK_INDEX_TYPE_UINT16
+      withArrayLen [descriptorSet] $ \count pSets ->
+        vkCmdBindDescriptorSets cmd VK_PIPELINE_BIND_POINT_GRAPHICS pipelineLayout' 0 (fromIntegral count) pSets 0 VK_NULL
       vkCmdDrawIndexed cmd 6 1 0 0 0
       vkCmdEndRenderPass cmd
       endCommandBuffer cmd
@@ -803,7 +852,7 @@ createCommandBuffers device pool frameBuffers renderpass extent_ pipeline vertex
       let
         area = rect2D (offset2D 0 0) extent_
         clearValue = createVk @VkClearValue
-          $ set            @"color" clearColor
+          $  set           @"color" clearColor
 
         clearColor = createVk @VkClearColorValue
           $  setAt         @"float32" @0 0
@@ -822,3 +871,34 @@ createCommandBuffers device pool frameBuffers renderpass extent_ pipeline vertex
       in
         withPtr renderPassInfo $ \rpiPtr ->
           vkCmdBeginRenderPass buffer_ rpiPtr VK_SUBPASS_CONTENTS_INLINE
+
+createDescriptorSets
+  :: VkDevice
+  -> VkDescriptorPool
+  -> VkDescriptorSetLayout
+  -> [(VkBuffer, VkDeviceMemory)]
+  -> ResIO [VkDescriptorSet]
+createDescriptorSets device pool layout ubos = do
+  sets <- descriptorSets device pool (replicate (length ubos) layout)
+  forM_ (zip sets ubos) $ \(descriptorSet, (uniformBuffer, _)) -> do
+    let
+      bufferInfo = createVk @VkDescriptorBufferInfo
+        $  set           @"buffer" uniformBuffer
+        &* set           @"offset" 0
+        &* set           @"range" (fromIntegral uniformBufferObjectSize)
+
+      descriptorWrite = createVk @VkWriteDescriptorSet
+        $  set           @"sType" VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
+        &* set           @"pNext" VK_NULL
+        &* set           @"dstSet" descriptorSet
+        &* set           @"dstBinding" 0
+        &* set           @"dstArrayElement" 0
+        &* set           @"descriptorType" VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+        &* set           @"descriptorCount" 1
+        &* setVkRef      @"pBufferInfo" bufferInfo
+        &* set           @"pImageInfo" VK_NULL
+        &* set           @"pTexelBufferView" VK_NULL
+
+    updateDescriptorSets device [descriptorWrite] []
+
+  return sets
