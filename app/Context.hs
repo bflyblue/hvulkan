@@ -83,6 +83,7 @@ data Context = Context
   , graphicsCommandPool       :: VkCommandPool
   , cmdBuffers                :: [VkCommandBuffer]
   , vertexBuffer              :: VkBuffer
+  , indexBuffer               :: VkBuffer
   }
 
 data Vertex = Vertex
@@ -126,6 +127,11 @@ withContext Config{..} action = runResourceT $ do
                                  device
                                  graphicsCommandPool
                                  graphicsQueue
+  indexBuffer               <- createIndexBuffer
+                                 physicalDevice
+                                 device
+                                 graphicsCommandPool
+                                 graphicsQueue
 
   let
     swapchainLoop = do
@@ -157,8 +163,7 @@ withContext Config{..} action = runResourceT $ do
                                  renderpass
                                  swapExtent
                                  views
-        liftIO $ vkResetCommandPool device graphicsCommandPool VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT
-          >>= throwVkResult "vkResetCommandPool: Failed to reset command pool."
+        resetCommandPool device graphicsCommandPool VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT
         cmdBuffers          <- createCommandBuffers
                                  device
                                  graphicsCommandPool
@@ -167,6 +172,7 @@ withContext Config{..} action = runResourceT $ do
                                  swapExtent
                                  pipeline
                                  vertexBuffer
+                                 indexBuffer
         syncs               <- replicateM 3 (syncSet device)
 
         liftIO $ action Context{..}
@@ -240,9 +246,9 @@ pickPhysicalDevice vkInstance surface requiredExtensions = liftIO $ do
     logDeviceFeatures feats = do
       logMsg $ unwords [ "Geometry Shader:", isSupported $ geometryShaderFeature feats]
       logMsg $ unwords [ "Tessellation Shader:", isSupported $ tessellationShaderFeature feats]
-
-    isSupported VK_TRUE = "Yes"
-    isSupported _       = "No"
+      where
+        isSupported VK_TRUE = "Yes"
+        isSupported _       = "No"
 
     logDeviceExtensionProperties extensions =
       logMsg $ unwords [ "Device Extensions:", unwords (map extensionName extensions)]
@@ -650,23 +656,14 @@ createVertexBuffer
   -> ResIO VkBuffer
 createVertexBuffer physicalDevice device pool graphicsQueue = do
   let vertices = Vector.fromList
-                  [ Vertex (V2 0.0 -0.5) (V3 1.0 0.0 0.0)
-                  , Vertex (V2 0.5  0.5) (V3 0.0 1.0 0.0)
-                  , Vertex (V2 -0.5 0.5) (V3 0.0 0.0 1.0)
+                  [ Vertex (V2 -0.5 -0.5) (V3 1.0 0.0 0.0)
+                  , Vertex (V2  0.5 -0.5) (V3 0.0 1.0 0.0)
+                  , Vertex (V2  0.5  0.5) (V3 0.0 0.0 1.0)
+                  , Vertex (V2 -0.5  0.5) (V3 1.0 1.0 1.0)
                   ]
-      verticesSize = fromIntegral $ vertexSize * Vector.length vertices
 
-  (stagingBuffer, stagingBufferMemory)
-         <- createBuffer'
-              physicalDevice
-              device
-              verticesSize
-              VK_BUFFER_USAGE_TRANSFER_SRC_BIT
-              (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-  mapPtr <- mapMemory device stagingBufferMemory 0 verticesSize 0
-  liftIO $ Vector.unsafeWith vertices $ \ptr ->
-    copyBytes mapPtr ptr (fromIntegral verticesSize)
-  unmapMemory device stagingBufferMemory
+      numVertices  = Vector.length vertices
+      verticesSize = fromIntegral $ vertexSize * numVertices
 
   (vertexBuffer, _vertexBufferMemory)
          <- createBuffer'
@@ -675,11 +672,59 @@ createVertexBuffer physicalDevice device pool graphicsQueue = do
               verticesSize
               (VK_BUFFER_USAGE_TRANSFER_DST_BIT .|. VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-  copyBuffer device pool graphicsQueue stagingBuffer vertexBuffer verticesSize
 
-  -- TODO free staging buffer/memory
+  liftIO $ runResourceT $ do
+    (stagingBuffer, stagingBufferMemory)
+           <- createBuffer'
+                physicalDevice
+                device
+                verticesSize
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    mapPtr <- mapMemory device stagingBufferMemory 0 verticesSize 0
+    liftIO $ Vector.unsafeWith vertices $ \ptr ->
+      copyBytes mapPtr ptr (fromIntegral verticesSize)
+    unmapMemory device stagingBufferMemory
+
+    copyBuffer device pool graphicsQueue stagingBuffer vertexBuffer verticesSize
 
   return vertexBuffer
+
+createIndexBuffer
+  :: VkPhysicalDevice
+  -> VkDevice
+  -> VkCommandPool
+  -> VkQueue
+  -> ResIO VkBuffer
+createIndexBuffer physicalDevice device pool graphicsQueue = do
+  let indices = Vector.fromList [ 0, 1, 2, 2, 3, 0 ] :: Vector.Vector CUShort
+      numIndices  = Vector.length indices
+      indicesSize = fromIntegral $ sizeOf @CUShort 0  * numIndices
+
+  (indexBuffer, _indexBufferMemory)
+         <- createBuffer'
+              physicalDevice
+              device
+              indicesSize
+              (VK_BUFFER_USAGE_TRANSFER_DST_BIT .|. VK_BUFFER_USAGE_INDEX_BUFFER_BIT)
+              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+
+  liftIO $ runResourceT $ do
+    (stagingBuffer, stagingBufferMemory)
+           <- createBuffer'
+                physicalDevice
+                device
+                indicesSize
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    mapPtr <- mapMemory device stagingBufferMemory 0 indicesSize 0
+    liftIO $ Vector.unsafeWith indices $ \ptr ->
+      copyBytes mapPtr ptr (fromIntegral indicesSize)
+    unmapMemory device stagingBufferMemory
+
+    copyBuffer device pool graphicsQueue stagingBuffer indexBuffer indicesSize
+
+  return indexBuffer
 
 copyBuffer
   :: VkDevice
@@ -733,8 +778,9 @@ createCommandBuffers
   -> VkExtent2D
   -> VkPipeline
   -> VkBuffer
+  -> VkBuffer
   -> ResIO [VkCommandBuffer]
-createCommandBuffers device pool frameBuffers renderpass extent_ pipeline vertexBuffer = do
+createCommandBuffers device pool frameBuffers renderpass extent_ pipeline vertexBuffer indexBuffer = do
   cmdBuffers <- commandBuffers device pool (length frameBuffers)
 
   liftIO $
@@ -744,8 +790,9 @@ createCommandBuffers device pool frameBuffers renderpass extent_ pipeline vertex
       vkCmdBindPipeline cmd VK_PIPELINE_BIND_POINT_GRAPHICS pipeline
       withArrayLen [vertexBuffer] $ \_ buffersPtr ->
         withArrayLen [0] $ \_ offsetsPtr ->
-        vkCmdBindVertexBuffers cmd 0 1 buffersPtr offsetsPtr
-      vkCmdDraw cmd 3 1 0 0
+          vkCmdBindVertexBuffers cmd 0 1 buffersPtr offsetsPtr
+      vkCmdBindIndexBuffer cmd indexBuffer 0 VK_INDEX_TYPE_UINT16
+      vkCmdDrawIndexed cmd 6 1 0 0 0
       vkCmdEndRenderPass cmd
       endCommandBuffer cmd
 
