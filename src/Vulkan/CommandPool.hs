@@ -7,6 +7,7 @@ module Vulkan.CommandPool
   ( commandPool
   , createCommandPool
   , destroyCommandPool
+  , resetCommandPool
   ) where
 
 import           Control.Monad
@@ -46,3 +47,8 @@ destroyCommandPool :: MonadIO m => VkDevice -> VkCommandPool -> m ()
 destroyCommandPool device pool = liftIO $
   vkDestroyCommandPool device pool VK_NULL
     <* logMsg "Destroyed command pool"
+
+resetCommandPool :: MonadIO m => VkDevice -> VkCommandPool -> VkCommandPoolResetFlags -> m ()
+resetCommandPool device pool flags =
+  liftIO $ vkResetCommandPool device pool flags
+    >>= throwVkResult "vkResetCommandPool: Failed to reset command pool."
