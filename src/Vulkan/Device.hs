@@ -15,6 +15,7 @@ module Vulkan.Device
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
+import           Foreign
 import           Foreign.C
 import           Foreign.Extra
 import           Graphics.Vulkan
@@ -59,7 +60,7 @@ createLogicalDevice physicalDevice extensions layers queueFamilyIndex = liftIO $
     queueInfo = createVk @VkDeviceQueueCreateInfo
       $  set        @"sType" VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO
       &* set        @"pNext" VK_NULL
-      &* set        @"flags" 0
+      &* set        @"flags" zeroBits
       &* set        @"queueFamilyIndex" queueFamilyIndex
       &* set        @"queueCount" 1
       &* setListRef @"pQueuePriorities" [1.0]
@@ -67,7 +68,7 @@ createLogicalDevice physicalDevice extensions layers queueFamilyIndex = liftIO $
     createInfo = createVk @VkDeviceCreateInfo
       $  set           @"sType" VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO
       &* set           @"pNext" VK_NULL
-      &* set           @"flags" 0
+      &* set           @"flags" zeroBits
       &* setListRef    @"pQueueCreateInfos" [ queueInfo ]
       &* set           @"queueCreateInfoCount" 1
       &* set           @"enabledLayerCount" (fromIntegral $ length layers)

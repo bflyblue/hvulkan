@@ -51,7 +51,7 @@ createShaderModule device srcFile = liftIO $ do
     createInfo bytesPtr len = createVk @VkShaderModuleCreateInfo
       $  set @"sType" VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO
       &* set @"pNext" VK_NULL
-      &* set @"flags" 0
+      &* set @"flags" zeroBits
       &* set @"pCode" ( castPtr bytesPtr )
       &* set @"codeSize" ( fromIntegral len )
 

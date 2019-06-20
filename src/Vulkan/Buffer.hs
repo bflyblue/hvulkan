@@ -12,6 +12,7 @@ module Vulkan.Buffer
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
+import           Foreign
 import           Foreign.Extra
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0
@@ -52,7 +53,7 @@ createBuffer device usage size sharingMode queueFamilyIndices = liftIO $
     bufferInfo = createVk @VkBufferCreateInfo
       $  set           @"sType" VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO
       &* set           @"pNext" VK_NULL
-      &* set           @"flags" 0
+      &* set           @"flags" zeroBits
       &* set           @"usage" usage
       &* set           @"size" size
       &* set           @"sharingMode" sharingMode

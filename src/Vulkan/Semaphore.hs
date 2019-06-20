@@ -12,6 +12,7 @@ module Vulkan.Semaphore
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
+import           Foreign
 import           Foreign.Extra
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0
@@ -39,7 +40,7 @@ createSemaphore device = liftIO $
     createInfo = createVk @VkSemaphoreCreateInfo
       $  set           @"sType" VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
       &* set           @"pNext" VK_NULL
-      &* set           @"flags" 0
+      &* set           @"flags" zeroBits
 
 destroySemaphore :: MonadIO m => VkDevice -> VkSemaphore -> m ()
 destroySemaphore device sem = liftIO $

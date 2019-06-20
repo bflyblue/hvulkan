@@ -102,7 +102,7 @@ physicalDeviceMemory physicalDevice = liftIO $ do
   return (memoryTypes, memoryHeaps)
 
 readArray
-  :: forall fname a. ( VulkanMarshal a, Storable (FieldType fname a), CanReadFieldArray fname 0 a )
+  :: forall fname a. ( VulkanMarshal a, Storable (FieldType fname a), CanReadFieldArray fname a )
   => a
   -> Int
   -> IO [FieldType fname a]

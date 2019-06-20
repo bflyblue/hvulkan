@@ -56,7 +56,7 @@ createRenderPass device format = liftIO $
 
     subpass =
       createVk @VkSubpassDescription
-        $  set        @"flags" 0
+        $  set        @"flags" zeroBits
         &* set        @"pipelineBindPoint" VK_PIPELINE_BIND_POINT_GRAPHICS
         &* set        @"inputAttachmentCount" 0
         &* set        @"pInputAttachments" VK_NULL
@@ -71,7 +71,7 @@ createRenderPass device format = liftIO $
       createVk @VkRenderPassCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO
         &* set        @"pNext" VK_NULL
-        &* set        @"flags" 0
+        &* set        @"flags" zeroBits
         &* set        @"attachmentCount" 1
         &* setListRef @"pAttachments" [colorAttachment]
         &* set        @"subpassCount" 1
@@ -83,7 +83,7 @@ createRenderPass device format = liftIO $
       createVk @VkSubpassDependency
         $  set        @"srcSubpass" VK_SUBPASS_EXTERNAL
         &* set        @"srcStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-        &* set        @"srcAccessMask" 0
+        &* set        @"srcAccessMask" zeroBits
         &* set        @"dstSubpass" 0
         &* set        @"dstStageMask" VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
         &* set        @"dstAccessMask" (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT .|. VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)

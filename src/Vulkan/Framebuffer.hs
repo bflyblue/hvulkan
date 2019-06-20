@@ -12,6 +12,7 @@ module Vulkan.Framebuffer
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
+import           Foreign
 import           Foreign.Extra
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0
@@ -55,7 +56,7 @@ createFramebuffer device renderpass extent_ attachments = liftIO $
     createInfo = createVk @VkFramebufferCreateInfo
       $  set           @"sType" VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO
       &* set           @"pNext" VK_NULL
-      &* set           @"flags" 0
+      &* set           @"flags" zeroBits
       &* set           @"renderPass" renderpass
       &* set           @"attachmentCount" (fromIntegral $ length attachments)
       &* setListRef    @"pAttachments" attachments

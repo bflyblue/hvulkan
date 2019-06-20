@@ -79,7 +79,7 @@ updateUniformBuffer
   -> m ()
 updateUniformBuffer Context{..} imageIndex = do
   let (_, uniformBufferMemory) = ubos !! fromIntegral imageIndex
-  mapPtr <- mapMemory device uniformBufferMemory 0 (fromIntegral uniformBufferObjectSize) 0
+  mapPtr <- mapMemory device uniformBufferMemory 0 (fromIntegral uniformBufferObjectSize) zeroBits
   liftIO $ poke mapPtr ubo
   unmapMemory device uniformBufferMemory
   where

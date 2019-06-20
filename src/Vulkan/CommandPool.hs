@@ -13,6 +13,7 @@ module Vulkan.CommandPool
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
+import           Foreign
 import           Foreign.Extra
 import           Graphics.Vulkan
 import           Graphics.Vulkan.Core_1_0
@@ -40,7 +41,7 @@ createCommandPool device familyIndex = liftIO $
     createInfo = createVk @VkCommandPoolCreateInfo
       $  set           @"sType" VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO
       &* set           @"pNext" VK_NULL
-      &* set           @"flags" 0
+      &* set           @"flags" zeroBits
       &* set           @"queueFamilyIndex" familyIndex
 
 destroyCommandPool :: MonadIO m => VkDevice -> VkCommandPool -> m ()

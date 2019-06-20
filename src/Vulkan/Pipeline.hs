@@ -65,7 +65,7 @@ createPipelineLayout device setLayouts = liftIO $
       createVk @VkPipelineLayoutCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
         &* set        @"pNext" VK_NULL
-        &* set        @"flags" 0
+        &* set        @"flags" zeroBits
         &* set        @"setLayoutCount" (fromIntegral $ length setLayouts)
         &* setListRef @"pSetLayouts" setLayouts
         &* set        @"pushConstantRangeCount" 0

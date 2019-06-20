@@ -54,7 +54,7 @@ createDescriptorSetLayout device bindings = liftIO $ do
     layoutInfo bindings_ = createVk @VkDescriptorSetLayoutCreateInfo
       $  set           @"sType" VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO
       &* set           @"pNext" VK_NULL
-      &* set           @"flags" 0
+      &* set           @"flags" zeroBits
       &* set           @"bindingCount" (fromIntegral $ length bindings_)
       &* setListRef    @"pBindings" bindings_
 

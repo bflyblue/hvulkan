@@ -172,7 +172,7 @@ withContext Config{..} action = runResourceT $ do
         graphicsDescriptorPool
                             <- descriptorPool
                                  device
-                                 0
+                                 zeroBits
                                  [(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, fromIntegral numSwapchainImages)]
                                  (fromIntegral numSwapchainImages)
         ubos                <- replicateM numSwapchainImages $
@@ -492,7 +492,7 @@ createGraphicsPipeline device format swapExtent setLayouts = do
       createVk @VkPipelineShaderStageCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO
         &* set        @"pNext" VK_NULL
-        &* set        @"flags" 0
+        &* set        @"flags" zeroBits
         &* set        @"stage" VK_SHADER_STAGE_VERTEX_BIT
         &* set        @"module" shaderModule
         &* setStrRef  @"pName" "main"
@@ -502,7 +502,7 @@ createGraphicsPipeline device format swapExtent setLayouts = do
       createVk @VkPipelineShaderStageCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO
         &* set        @"pNext" VK_NULL
-        &* set        @"flags" 0
+        &* set        @"flags" zeroBits
         &* set        @"stage" VK_SHADER_STAGE_FRAGMENT_BIT
         &* set        @"module" shaderModule
         &* setStrRef  @"pName" "main"
@@ -536,7 +536,7 @@ createGraphicsPipeline device format swapExtent setLayouts = do
       createVk @VkPipelineVertexInputStateCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
         &* set        @"pNext" VK_NULL
-        &* set        @"flags" 0
+        &* set        @"flags" zeroBits
         &* set        @"vertexBindingDescriptionCount" (fromIntegral $ length bindings)
         &* setListRef @"pVertexBindingDescriptions" bindings
         &* set        @"vertexAttributeDescriptionCount" (fromIntegral $ length attributes)
@@ -546,7 +546,7 @@ createGraphicsPipeline device format swapExtent setLayouts = do
       createVk @VkPipelineInputAssemblyStateCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO
         &* set        @"pNext" VK_NULL
-        &* set        @"flags" 0
+        &* set        @"flags" zeroBits
         &* set        @"topology" VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
         &* set        @"primitiveRestartEnable" VK_FALSE
 
@@ -563,7 +563,7 @@ createGraphicsPipeline device format swapExtent setLayouts = do
       createVk @VkPipelineViewportStateCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO
         &* set        @"pNext" VK_NULL
-        &* set        @"flags" 0
+        &* set        @"flags" zeroBits
         &* set        @"viewportCount" (fromIntegral $ length viewports)
         &* setListRef @"pViewports" viewports
         &* set        @"scissorCount" (fromIntegral $ length scissors)
@@ -573,7 +573,7 @@ createGraphicsPipeline device format swapExtent setLayouts = do
       createVk @VkPipelineRasterizationStateCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO
         &* set        @"pNext" VK_NULL
-        &* set        @"flags" 0
+        &* set        @"flags" zeroBits
         &* set        @"depthClampEnable" VK_FALSE
         &* set        @"rasterizerDiscardEnable" VK_FALSE
         &* set        @"polygonMode" VK_POLYGON_MODE_FILL
@@ -589,7 +589,7 @@ createGraphicsPipeline device format swapExtent setLayouts = do
       createVk @VkPipelineMultisampleStateCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO
         &* set        @"pNext" VK_NULL
-        &* set        @"flags" 0
+        &* set        @"flags" zeroBits
         &* set        @"sampleShadingEnable" VK_FALSE
         &* set        @"rasterizationSamples" VK_SAMPLE_COUNT_1_BIT
         &* set        @"minSampleShading" 1.0
@@ -616,7 +616,7 @@ createGraphicsPipeline device format swapExtent setLayouts = do
       createVk @VkPipelineColorBlendStateCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
         &* set        @"pNext" VK_NULL
-        &* set        @"flags" 0
+        &* set        @"flags" zeroBits
         &* set        @"logicOpEnable" VK_FALSE
         &* set        @"logicOp" VK_LOGIC_OP_COPY
         &* set        @"attachmentCount" 1
@@ -630,7 +630,7 @@ createGraphicsPipeline device format swapExtent setLayouts = do
       createVk @VkGraphicsPipelineCreateInfo
         $  set        @"sType" VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO
         &* set        @"pNext" VK_NULL
-        &* set        @"flags" 0
+        &* set        @"flags" zeroBits
         &* set        @"stageCount" (fromIntegral $ length stages)
         &* setListRef @"pStages" stages
         &* setVkRef   @"pVertexInputState" vertexInputInfo
@@ -714,7 +714,7 @@ createVertexBuffer physicalDevice device pool graphicsQueue = do
                 verticesSize
                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT
                 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-    mapPtr <- mapMemory device stagingBufferMemory 0 verticesSize 0
+    mapPtr <- mapMemory device stagingBufferMemory 0 verticesSize zeroBits
     liftIO $ Vector.unsafeWith vertices $ \ptr ->
       copyBytes mapPtr ptr (fromIntegral verticesSize)
     unmapMemory device stagingBufferMemory
@@ -750,7 +750,7 @@ createIndexBuffer physicalDevice device pool graphicsQueue = do
                 indicesSize
                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT
                 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT .|. VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-    mapPtr <- mapMemory device stagingBufferMemory 0 indicesSize 0
+    mapPtr <- mapMemory device stagingBufferMemory 0 indicesSize zeroBits
     liftIO $ Vector.unsafeWith indices $ \ptr ->
       copyBytes mapPtr ptr (fromIntegral indicesSize)
     unmapMemory device stagingBufferMemory
