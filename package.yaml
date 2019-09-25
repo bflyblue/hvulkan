@@ -29,7 +29,7 @@ dependencies:
 - template-haskell >= 2.14.0 && < 2.15
 - vector >= 0.12.0 && < 0.13
 - vulkan-api == 1.3.0.0
-- GLFW-b == 3.2.1.0
+- GLFW-b == 3.2.1.1
 
 ghc-options:
 - -Wall
